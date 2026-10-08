@@ -1,0 +1,13 @@
+<?xml version="1.0" ?>
+<!DOCTYPE nvidia_smi_log SYSTEM "nvsmi_device_v13.dtd">
+<nvidia_smi_log>
+	<timestamp>Thu Oct  8 16:29:02 2026</timestamp>
+	<driver_version>580.126.09</driver_version>
+	<cuda_version>13.0</cuda_version>
+	<attached_gpus>8</attached_gpus>
+	<gpu id="00000000:65:02.0">
+		<product_name>NVIDIA H20-3e</product_name>
+		<product_brand>NVIDIA</product_brand>
+		<uuid>GPU-1827b3ab-5ea7-0628-de76-e34643d5edf7</uuid>
+	</gpu>
+</nvidia_smi_log>

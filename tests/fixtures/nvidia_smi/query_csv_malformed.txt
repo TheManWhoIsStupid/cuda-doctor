@@ -1,0 +1,6 @@
+NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver. Make sure that the latest NVIDIA driver is installed and running.
+
+,,
+0, NVIDIA H100 PCIe [partial row]
+1, NVIDIA A100-SXM4-40GB, GPU-1a2b-3c4d, [N/A], 8.0
+junk

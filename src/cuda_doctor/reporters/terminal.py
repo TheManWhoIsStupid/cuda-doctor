@@ -30,10 +30,15 @@ _SEVERITY_MARK = {
 
 
 class TerminalReporter(Reporter):
-    """Human-oriented report with ✓/⚠/✗ symbols (ASCII fallback off-UTF-8)."""
+    """Human-oriented report with ✓/⚠/✗ symbols (ASCII fallback off-UTF-8).
 
-    def __init__(self, console: Console | None = None) -> None:
+    With ``verbose=False`` info-level notes are summarized away and internal
+    probe failures are hidden (they remain in the JSON report regardless).
+    """
+
+    def __init__(self, console: Console | None = None, verbose: bool = True) -> None:
         self._console = console
+        self._verbose = verbose
 
     def render(self, inputs: ReportInputs) -> str:
         console = self._console
@@ -255,11 +260,25 @@ class TerminalReporter(Reporter):
         self, console: Console, result: DiagnosisResult, marks: dict[str, str]
     ) -> None:
         self._section(console, "Potential Issues")
-        if not result.issues:
-            self._kv(console, "None", "no issues found", marks["ok"])
+        shown = [
+            issue
+            for issue in result.issues
+            if self._verbose or issue.severity is not Severity.INFO
+        ]
+        hidden = len(result.issues) - len(shown)
+        if not shown:
+            if hidden:
+                self._kv(console, "None", "no warnings or errors found", marks["ok"])
+                self._kv(
+                    console,
+                    "Hidden",
+                    f"{hidden} info-level notes (use --verbose to show)",
+                )
+            else:
+                self._kv(console, "None", "no issues found", marks["ok"])
             console.print()
             return
-        for issue in result.issues:
+        for issue in shown:
             mark = marks[_SEVERITY_MARK[issue.severity]]
             console.print(f"  {mark} [bold]{issue.code}[/bold]  {issue.title}")
             if issue.description:
@@ -268,6 +287,11 @@ class TerminalReporter(Reporter):
                 console.print(f"      [dim]· {redact_text(line)}[/dim]")
             for line in issue.recommendations:
                 console.print(f"      → {redact_text(line)}")
+            console.print()
+        if hidden:
+            self._kv(
+                console, "Hidden", f"{hidden} info-level notes (use --verbose to show)"
+            )
             console.print()
 
     def _internal_errors(
@@ -278,7 +302,7 @@ class TerminalReporter(Reporter):
         marks: dict[str, str],
     ) -> None:
         errors = {**snapshot.collection_errors, **result.check_errors}
-        if not errors:
+        if not errors or not self._verbose:
             return
         self._section(console, "Internal Diagnostics")
         self._kv(

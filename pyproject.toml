@@ -81,6 +81,10 @@ select = [
     "RUF", # ruff-specific
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# typer.Option() in parameter defaults is the framework's intended idiom.
+"src/cuda_doctor/cli.py" = ["B008"]
+
 [tool.mypy]
 python_version = "3.10"
 mypy_path = "src"

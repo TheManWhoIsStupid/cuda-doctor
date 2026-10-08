@@ -56,11 +56,18 @@ class MarkdownReporter(Reporter):
         add(f"- **Python**: {system.python_version} ({redact_text(system.python_executable)})")
 
         if snapshot.gpus:
-            devices = ", ".join(
-                f"{gpu.name} {_format_memory(gpu.memory_total_mb)}".rstrip()
-                for gpu in snapshot.gpus
-            )
-            add(f"- **GPU(s)**: {len(snapshot.gpus)} x {devices}")
+            names = {gpu.name for gpu in snapshot.gpus}
+            if len(names) == 1:
+                gpu = snapshot.gpus[0]
+                memory = _format_memory(gpu.memory_total_mb)
+                each = f" ({memory} each)" if memory else ""
+                add(f"- **GPU(s)**: {len(snapshot.gpus)} x {gpu.name}{each}")
+            else:
+                devices = ", ".join(
+                    f"{gpu.name} {_format_memory(gpu.memory_total_mb)}".rstrip()
+                    for gpu in snapshot.gpus
+                )
+                add(f"- **GPU(s)**: {devices}")
         else:
             add("- **GPU(s)**: none detected")
 

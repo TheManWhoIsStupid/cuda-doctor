@@ -1,0 +1,23 @@
+{
+  "comment": "Known problem signatures matched against free-text diagnostics (e.g. PyTorch import errors). Matching is substring-based and intentionally conservative; advice strings are suggestions only.",
+  "torch_import": [
+    {
+      "id": "KI-TORCH-001",
+      "contains": ["libcuda.so", "libcuda.dll", "cuda.dll"],
+      "title": "PyTorch cannot load the NVIDIA driver library",
+      "advice": "The CUDA userland is installed, but the NVIDIA driver library cannot be found. Install or reinstall the NVIDIA driver; on Linux also check that /usr/lib/x86_64-linux-gnu (or the driver's lib directory) contains libcuda.so.1 and that LD_LIBRARY_PATH does not shadow it with a different CUDA version."
+    },
+    {
+      "id": "KI-TORCH-002",
+      "contains": ["libcudart.so", "cudart64"],
+      "title": "PyTorch cannot find the CUDA runtime it was built against",
+      "advice": "The torch installation appears broken or was copied between environments. Reinstall the PyTorch wheel that matches your platform (https://pytorch.org/get-started/locally)."
+    },
+    {
+      "id": "KI-TORCH-003",
+      "contains": ["undefined symbol"],
+      "title": "Possible binary incompatibility inside PyTorch",
+      "advice": "An 'undefined symbol' at import usually means mixed CUDA versions (e.g. torch built for one CUDA major version loading libraries from another). Reinstall PyTorch in a fresh virtual environment and avoid mixing pip wheels with conda CUDA packages."
+    }
+  ]
+}

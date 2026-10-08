@@ -71,6 +71,10 @@ class NvidiaSmiClient:
         if csv.error is None:
             result.gpus = parse_query_gpu_csv(csv.stdout)
             result.info.stdout_excerpt = _excerpt(csv.stdout)
+            if csv.return_code != 0 and not result.gpus:
+                # Executed but failed (e.g. driver problem): keep as evidence.
+                result.info.error = f"exit-{csv.return_code}"
+                result.info.stderr_excerpt = _excerpt(csv.stderr)
         else:
             result.info.error = csv.error
             result.info.stderr_excerpt = _excerpt(csv.stderr)

@@ -42,8 +42,11 @@ def redact_value(value: Any, home: str | None = None) -> Any:
     - tuples become lists (JSON-ready);
     - dicts and lists are walked recursively.
 
-    Passing ``home=""`` performs normalization without redaction.
+    ``home`` defaults to the current user's home directory; passing ``home=""``
+    performs normalization without redaction.
     """
+    if home is None:
+        home = default_home()
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, str):

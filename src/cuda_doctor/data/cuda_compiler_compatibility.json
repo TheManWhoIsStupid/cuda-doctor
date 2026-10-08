@@ -1,0 +1,69 @@
+{
+  "comment": "Coarse host-compiler support per CUDA toolkit version. Sources: CUDA Installation Guide (Linux: supported GCC versions; Windows: supported Visual Studio versions). Findings based on this table are always worded as 'potential' because exact support also depends on minor releases. Keep in sync with the NVIDIA documentation when new toolkits ship.",
+  "linux": {
+    "max_supported_gcc_major": {
+      "11.0": 9,
+      "11.1": 10,
+      "11.2": 10,
+      "11.3": 10,
+      "11.4": 11,
+      "11.5": 11,
+      "11.6": 11,
+      "11.7": 11,
+      "11.8": 11,
+      "12.0": 12,
+      "12.1": 12,
+      "12.2": 12,
+      "12.3": 12,
+      "12.4": 13,
+      "12.5": 13,
+      "12.6": 13,
+      "13.0": 14
+    }
+  },
+  "windows": {
+    "min_vs_major": {
+      "11.0": 15,
+      "11.1": 15,
+      "11.2": 15,
+      "11.3": 15,
+      "11.4": 15,
+      "11.5": 15,
+      "11.6": 15,
+      "11.7": 15,
+      "11.8": 15,
+      "12.0": 16,
+      "12.1": 16,
+      "12.2": 16,
+      "12.3": 16,
+      "12.4": 16,
+      "12.5": 16,
+      "12.6": 16,
+      "13.0": 16
+    },
+    "max_vs_major": {
+      "11.0": 16,
+      "11.1": 16,
+      "11.2": 16,
+      "11.3": 16,
+      "11.4": 16,
+      "11.5": 16,
+      "11.6": 16,
+      "11.7": 16,
+      "11.8": 17,
+      "12.0": 17,
+      "12.1": 17,
+      "12.2": 17,
+      "12.3": 17,
+      "12.4": 17,
+      "12.5": 17,
+      "12.6": 17,
+      "13.0": 17
+    },
+    "installation_version_to_vs_year": {
+      "15": 2017,
+      "16": 2019,
+      "17": 2022
+    }
+  }
+}

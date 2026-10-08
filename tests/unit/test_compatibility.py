@@ -20,36 +20,82 @@ def compat():
 
 
 class TestDriverCompatibility:
-    def test_table_loads(self, compat):
-        assert compat.driver.minimum_driver(CudaVersion(12, 4), Platform.LINUX) == (550, 54, 14)
+    def test_documented_family_minimums(self, compat):
+        # NVIDIA-documented minor-version-compatibility baselines.
+        assert (
+            compat.driver.family_minimum(CudaVersion(11, 8), Platform.LINUX)
+            == (450, 80, 2)
+        )
+        assert (
+            compat.driver.family_minimum(CudaVersion(11, 0), Platform.WINDOWS)
+            == (452, 39)
+        )
+        assert (
+            compat.driver.family_minimum(CudaVersion(12, 6), Platform.LINUX)
+            == (525, 60, 13)
+        )
+        assert (
+            compat.driver.family_minimum(CudaVersion(12, 0), Platform.WINDOWS)
+            == (528, 33)
+        )
+        assert (
+            compat.driver.family_minimum(CudaVersion(13, 0), Platform.LINUX)
+            == (580, 65, 6)
+        )
 
-    def test_exact_windows(self, compat):
-        assert compat.driver.minimum_driver(CudaVersion(12, 4), Platform.WINDOWS) == (551, 61)
+    def test_future_major_is_unknown_not_inherited(self, compat):
+        # CUDA 14 must NOT reuse CUDA 13 requirements (or any older family).
+        assert compat.driver.family_minimum(CudaVersion(14, 0), Platform.LINUX) is None
+        verdict = compat.driver.evaluate(CudaVersion(14, 0), (580, 65, 6), Platform.LINUX)
+        assert verdict.compatible is None
+        assert "unknown" in verdict.message
 
-    def test_unknown_minor_falls_back_to_nearest_lower(self, compat):
-        # 12.9 is not in the table; 12.6 requirements apply as a lower bound.
-        assert compat.driver.minimum_driver(CudaVersion(12, 9), Platform.LINUX) == (560, 28, 4)
+    def test_unknown_minor_within_family_uses_family_rule(self, compat):
+        # The family rule is documented across the entire major family,
+        # so an unknown 12.9 still resolves to the CUDA 12.x minimum.
+        assert (
+            compat.driver.family_minimum(CudaVersion(12, 9), Platform.LINUX)
+            == (525, 60, 13)
+        )
 
-    def test_future_major_falls_back_to_newest_known(self, compat):
-        assert compat.driver.minimum_driver(CudaVersion(14, 0), Platform.LINUX) == (580, 65, 6)
+    def test_platform_without_table_is_unknown(self, compat):
+        assert compat.driver.family_minimum(CudaVersion(12, 4), Platform.MACOS) is None
 
     def test_evaluate_ok(self, compat):
         verdict = compat.driver.evaluate(
             CudaVersion(12, 4), (550, 54, 14), Platform.LINUX
         )
         assert verdict.compatible is True
+        assert "minor-version compatibility" in verdict.message
 
-    def test_evaluate_too_old(self, compat):
+    def test_evaluate_below_family_minimum(self, compat):
         verdict = compat.driver.evaluate(
-            CudaVersion(12, 4), (545, 23), Platform.LINUX
+            CudaVersion(12, 6), (515, 43, 4), Platform.LINUX
         )
         assert verdict.compatible is False
-        assert "requires driver 550.54.14" in verdict.message
+        assert "525.60.13" in verdict.message
 
     def test_from_json_direct(self):
-        data = {"linux": {"12.4": ">=550.54.14"}}
+        data = {
+            "minor_version_compatibility": {
+                "12": {"linux": ">=525.60.13", "windows": ">=528.33"}
+            }
+        }
         compat = DriverCompatibility.from_json(data)
-        assert compat.minimum_driver(CudaVersion(12, 4), Platform.LINUX) == (550, 54, 14)
+        assert compat.family_minimum(CudaVersion(12, 9), Platform.LINUX) == (525, 60, 13)
+        assert compat.family_minimum(CudaVersion(12, 9), Platform.WINDOWS) == (528, 33)
+        assert compat.family_minimum(CudaVersion(11, 8), Platform.LINUX) is None
+
+    def test_from_json_ignores_malformed_entries(self):
+        data = {
+            "minor_version_compatibility": {
+                "comment-ish": {"linux": ">=1"},
+                "12": {"linux": 525, "windows": ">=528.33"},
+            }
+        }
+        compat = DriverCompatibility.from_json(data)
+        assert compat.family_minimum(CudaVersion(12, 0), Platform.LINUX) is None
+        assert compat.family_minimum(CudaVersion(12, 0), Platform.WINDOWS) == (528, 33)
 
 
 class TestCompilerCompatibility:
@@ -65,6 +111,24 @@ class TestCompilerCompatibility:
         verdict = compat.compiler.evaluate_gcc((14, 2, 0), CudaVersion(12, 4))
         assert verdict.compatible is False
         assert "potential compatibility issue" in verdict.message
+
+    def test_future_cuda_major_is_unknown_not_inherited(self, compat):
+        # CUDA 14 must not reuse CUDA 13 (or any older) compiler rules.
+        assert compat.compiler.max_supported_gcc_major(CudaVersion(14, 0)) is None
+        verdict = compat.compiler.evaluate_gcc((11, 4, 0), CudaVersion(14, 0))
+        assert verdict.compatible is None
+        assert "unknown" in verdict.message
+        assert compat.compiler.vs_range(CudaVersion(14, 0)) == (None, None)
+        vs = compat.compiler.evaluate_visual_studio((17, 11), CudaVersion(14, 0))
+        assert vs.compatible is None
+
+    def test_unknown_minor_is_unknown_not_inherited(self, compat):
+        # Compiler support is documented per toolkit release, not per family:
+        # an unknown 12.9 must not silently reuse 12.6's rules.
+        assert compat.compiler.max_supported_gcc_major(CudaVersion(12, 9)) is None
+        verdict = compat.compiler.evaluate_gcc((11, 4, 0), CudaVersion(12, 9))
+        assert verdict.compatible is None
+        assert compat.compiler.vs_range(CudaVersion(12, 9)) == (None, None)
 
     def test_vs_range(self, compat):
         assert compat.compiler.vs_range(CudaVersion(11, 4)) == (15, 16)

@@ -1,9 +1,12 @@
 """PyTorch checks.
 
 The torch/CUDA relationship is subtle, and these checks encode the product's
-most important nuance: a local-toolkit/runtime version difference is normally
-harmless (TORCH004 stays INFO), while a runtime *newer than the driver
-supports* is a real error (TORCH006).
+most important nuances: a local-toolkit/runtime version difference is normally
+harmless (TORCH004 stays INFO); a runtime from a newer CUDA *generation* than
+the driver's is a real error (TORCH006); a newer minor within the same family
+is covered by CUDA minor-version compatibility and is never an error by
+itself; and observed runtime success (``torch.cuda.is_available()`` True)
+always overrides static version comparisons.
 """
 
 from __future__ import annotations
@@ -14,10 +17,7 @@ from cuda_doctor.core.context import DiagnosticContext
 from cuda_doctor.core.enums import Severity
 from cuda_doctor.diagnosis.issue import Issue
 from cuda_doctor.diagnosis.recommendations import recommendations_for
-from cuda_doctor.utils.versions import (
-    compare_versions,
-    parse_cuda_version,
-)
+from cuda_doctor.utils.versions import parse_cuda_version, parse_driver_version
 
 
 class PyTorchNotInstalled(Check):
@@ -94,8 +94,28 @@ class PyTorchCudaUnavailable(Check):
             "torch.cuda.is_available() -> False",
         ]
         driver = ctx.snapshot.driver
+        driver_version = driver.version if driver is not None else None
         if driver is not None and driver.cuda_version:
-            evidence.append(f"driver supports at most CUDA {driver.cuda_version}")
+            evidence.append(
+                f"driver CUDA UMD version: {driver.cuda_version} "
+                "(the toolkit generation the driver was validated with)"
+            )
+        # Fold the documented family minimum into the evidence: when the
+        # driver is below it, that is the likely cause (see also TORCH006).
+        torch_cuda = parse_cuda_version(torch_info.cuda_version)
+        installed = parse_driver_version(driver_version) if driver_version else None
+        if (
+            ctx.compatibility is not None
+            and torch_cuda is not None
+            and installed is not None
+        ):
+            verdict = ctx.compatibility.driver.evaluate(torch_cuda, installed, ctx.platform)
+            if verdict.compatible is False and verdict.minimum_driver:
+                minimum_text = ".".join(str(part) for part in verdict.minimum_driver)
+                evidence.append(
+                    f"driver {driver_version} is below the documented minimum for "
+                    f"CUDA {torch_cuda.major}.x ({minimum_text}) — a likely cause"
+                )
         return [
             self.issue(
                 severity=Severity.ERROR,
@@ -103,7 +123,7 @@ class PyTorchCudaUnavailable(Check):
                 description=(
                     "This PyTorch build supports CUDA, but CUDA could not be "
                     "initialized. Typical causes: no NVIDIA driver, a driver too old "
-                    "for the build's CUDA runtime, or a broken driver installation."
+                    "for the build's CUDA generation, or a broken driver installation."
                 ),
                 evidence=evidence,
                 recommendations=recommendations_for(self.code),
@@ -177,37 +197,82 @@ class PyTorchRuntimeDiffers(Check):
 
 
 class PyTorchNewerThanDriver(Check):
-    """TORCH006: torch's CUDA runtime exceeds what the driver supports."""
+    """TORCH006: torch's runtime needs a newer driver *generation*.
+
+    Uses the CUDA major-family model, so a newer minor within the same family
+    is NOT an error by itself (that is minor-version compatibility; if CUDA is
+    unavailable there, TORCH002 carries the diagnosis). Observed runtime
+    success always overrides the static comparison: when
+    ``torch.cuda.is_available()`` is True, this check stays silent no matter
+    what the version numbers say.
+    """
 
     code = "TORCH006"
     category = "pytorch"
 
     def run(self, ctx: DiagnosticContext) -> list[Issue]:
         snapshot = ctx.snapshot
-        torch_cuda = parse_cuda_version(snapshot.pytorch.cuda_version)
+        torch_info = snapshot.pytorch
+        torch_cuda = parse_cuda_version(torch_info.cuda_version)
+        if torch_cuda is None:
+            return []
         driver = snapshot.driver
-        if driver is None or not driver.cuda_version or torch_cuda is None:
+        if driver is None or not driver.version:
             return []
-        driver_max = parse_cuda_version(driver.cuda_version)
-        if driver_max is None or compare_versions(torch_cuda, driver_max) <= 0:
+        if torch_info.cuda_available is True:
+            # Observed working runtime beats any static heuristic.
             return []
-        return [
-            self.issue(
-                severity=Severity.ERROR,
-                title="PyTorch CUDA runtime newer than the driver supports",
-                description=(
-                    f"PyTorch was built for CUDA {torch_cuda}, but the installed "
-                    f"driver ({driver.version}) supports at most CUDA {driver_max}. "
-                    "torch.cuda will not work until the driver is updated (or a "
-                    "PyTorch build for an older CUDA is installed)."
-                ),
-                evidence=[
-                    f"torch.version.cuda = {torch_cuda}",
-                    f"driver {driver.version} (max CUDA {driver_max})",
-                ],
-                recommendations=recommendations_for(self.code),
-            )
-        ]
+
+        driver_max = parse_cuda_version(driver.cuda_version) if driver.cuda_version else None
+
+        # Torch's CUDA generation is beyond the driver's.
+        if driver_max is not None and driver_max.major < torch_cuda.major:
+            return [
+                self.issue(
+                    severity=Severity.ERROR,
+                    title="PyTorch CUDA runtime is from a newer generation than the driver",
+                    description=(
+                        f"PyTorch was built for CUDA {torch_cuda}, but the installed "
+                        f"driver ({driver.version}, max CUDA {driver_max}) belongs to "
+                        f"the CUDA {driver_max.major}.x generation. torch.cuda is not "
+                        "expected to work on this driver unless a CUDA "
+                        "forward-compatibility package is installed (datacenter GPUs "
+                        "only) — updating the driver (or installing a PyTorch build "
+                        "for an older CUDA) is the usual fix."
+                    ),
+                    evidence=[
+                        f"torch.version.cuda = {torch_cuda}",
+                        f"driver {driver.version} (CUDA UMD version {driver_max})",
+                    ],
+                    recommendations=recommendations_for(self.code),
+                )
+            ]
+
+        # Driver below the documented minimum for torch's CUDA family.
+        installed = parse_driver_version(driver.version)
+        if ctx.compatibility is not None and installed is not None:
+            verdict = ctx.compatibility.driver.evaluate(torch_cuda, installed, ctx.platform)
+            if verdict.compatible is False:
+                return [
+                    self.issue(
+                        severity=Severity.ERROR,
+                        title=(
+                            "Driver is below the documented minimum for "
+                            "PyTorch's CUDA generation"
+                        ),
+                        description=(
+                            f"{verdict.message} PyTorch was built for CUDA "
+                            f"{torch_cuda}; a driver this old is a likely reason "
+                            "torch.cuda is unavailable."
+                        ),
+                        evidence=[
+                            f"torch.version.cuda = {torch_cuda}",
+                            f"driver: {driver.version}",
+                        ],
+                        recommendations=recommendations_for(self.code),
+                    )
+                ]
+        return []
 
 
 class PyTorchCannotEnumerate(Check):

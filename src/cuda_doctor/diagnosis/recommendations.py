@@ -40,8 +40,10 @@ DEFAULT_RECOMMENDATIONS: dict[str, list[str]] = {
         "Run nvidia-smi manually to see what it reports.",
     ],
     "DRV002": [
-        "Update the NVIDIA driver to one supporting your CUDA version, or use an older "
-        "CUDA toolkit that your driver supports.",
+        "Update the NVIDIA driver to one from the CUDA generation your toolkit "
+        "belongs to (or newer), or use an older CUDA toolkit. Within the same CUDA "
+        "major family, minor-version compatibility usually applies once the driver "
+        "meets the documented family minimum.",
         DRIVER_DOWNLOAD,
         CUDA_TOOLKIT_DOCS,
     ],
@@ -94,8 +96,8 @@ DEFAULT_RECOMMENDATIONS: dict[str, list[str]] = {
         "environment.",
     ],
     "TORCH006": [
-        "Update the NVIDIA driver to a version supporting CUDA "
-        "(or install a PyTorch build for an older CUDA).",
+        "Update the NVIDIA driver to one from the CUDA generation PyTorch was built "
+        "for (or newer), or install a PyTorch build for an older CUDA generation.",
         DRIVER_DOWNLOAD,
     ],
     "CMP001": [

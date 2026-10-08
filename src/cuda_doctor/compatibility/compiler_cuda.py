@@ -1,11 +1,16 @@
-"""Host compiler <-> CUDA toolkit compatibility rules."""
+"""Host compiler <-> CUDA toolkit compatibility rules.
+
+Lookups are exact per toolkit version: the CUDA Installation Guide
+publishes compiler support per release, not per family, so an unknown
+toolkit version (a newer minor, or a future major like CUDA 14) is
+UNKNOWN — never inferred from an older release.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from cuda_doctor.compatibility._util import nearest_lower
 from cuda_doctor.utils.versions import CudaVersion, parse_version
 
 
@@ -63,12 +68,14 @@ class CompilerCompatibility:
         )
 
     def max_supported_gcc_major(self, cuda: CudaVersion) -> int | None:
-        return nearest_lower(self._max_gcc, cuda)
+        # Exact-version lookup only: NVIDIA documents compiler support per
+        # toolkit release, so unknown versions must stay UNKNOWN.
+        return self._max_gcc.get(cuda)
 
     def vs_range(self, cuda: CudaVersion) -> tuple[int | None, int | None]:
         return (
-            nearest_lower(self._min_vs, cuda),
-            nearest_lower(self._max_vs, cuda),
+            self._min_vs.get(cuda),
+            self._max_vs.get(cuda),
         )
 
     def vs_year(self, installation_major: int) -> int | None:
@@ -84,7 +91,11 @@ class CompilerCompatibility:
         """
         maximum = self.max_supported_gcc_major(cuda)
         if maximum is None:
-            return CompilerVerdict(None, "No compiler compatibility data for this CUDA version.")
+            return CompilerVerdict(
+                None,
+                f"No compiler compatibility data for CUDA {cuda}; "
+                "compatibility is unknown.",
+            )
         gcc_major = gcc_version[0] if gcc_version else 0
         if gcc_major <= maximum:
             return CompilerVerdict(

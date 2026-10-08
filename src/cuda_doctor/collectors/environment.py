@@ -62,5 +62,10 @@ class EnvironmentCollector:
         return info
 
     def _pathsep(self) -> str:
-        """PATH separator for the *target* platform (tests run cross-platform)."""
-        return ";" if self.platform is Platform.WINDOWS else os.pathsep
+        """PATH separator for the *target* platform, never the host's.
+
+        The collector supports an injected target platform (tests simulate
+        Windows targets on POSIX hosts and vice versa), so ``os.pathsep`` —
+        which describes the machine running Python — would be wrong.
+        """
+        return ";" if self.platform is Platform.WINDOWS else ":"

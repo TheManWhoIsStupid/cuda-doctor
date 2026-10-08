@@ -7,11 +7,7 @@ from cuda_doctor.core.context import DiagnosticContext
 from cuda_doctor.core.enums import Severity
 from cuda_doctor.diagnosis.issue import Issue
 from cuda_doctor.diagnosis.recommendations import recommendations_for
-from cuda_doctor.utils.versions import (
-    compare_versions,
-    parse_cuda_version,
-    parse_driver_version,
-)
+from cuda_doctor.utils.versions import parse_cuda_version, parse_driver_version
 
 
 class DriverUndetermined(Check):
@@ -49,11 +45,14 @@ class DriverUndetermined(Check):
 
 
 class DriverRuntimeCompatibility(Check):
-    """DRV002: driver vs. CUDA toolkit compatibility looks problematic.
+    """DRV002: driver vs. CUDA toolkit compatibility.
 
-    Primary, deterministic signal: the maximum CUDA version the driver reports
-    (nvidia-smi header) versus the installed toolkit. Fallback: the bundled
-    minimum-driver table, worded as a potential issue.
+    Uses NVIDIA's CUDA 11+ *minor-version compatibility* model instead of a
+    strict ceiling: the CUDA version reported by nvidia-smi is the CUDA UMD
+    version (the toolkit generation the driver was validated with), not a
+    hard limit. Within a CUDA major family, a newer toolkit usually runs on
+    an older driver as long as the driver meets the NVIDIA-documented family
+    minimum. Cross-generation toolkits are a genuine incompatibility.
     """
 
     code = "DRV002"
@@ -69,42 +68,91 @@ class DriverRuntimeCompatibility(Check):
             return []  # DRV001 owns the missing-driver case
 
         driver_max = parse_cuda_version(driver.cuda_version) if driver.cuda_version else None
-        if driver_max is not None and compare_versions(toolkit, driver_max) > 0:
+        installed = parse_driver_version(driver.version)
+        verdict = None
+        if ctx.compatibility is not None and installed is not None:
+            verdict = ctx.compatibility.driver.evaluate(toolkit, installed, ctx.platform)
+
+        # Cross-generation: the driver's CUDA family is older than the
+        # toolkit's — minor-version compatibility cannot help here.
+        if driver_max is not None and driver_max.major < toolkit.major:
             return [
                 self.issue(
                     severity=Severity.ERROR,
-                    title="CUDA Toolkit newer than the installed driver supports",
+                    title="CUDA Toolkit is from a newer CUDA generation than the driver",
                     description=(
                         f"nvcc reports CUDA {toolkit}, but the driver "
-                        f"({driver.version}) supports at most CUDA {driver_max}. "
-                        "Binaries built with this toolkit will fail to run until the "
-                        "driver is updated."
+                        f"({driver.version}, max CUDA {driver_max}) belongs to the "
+                        f"CUDA {driver_max.major}.x generation. Applications built "
+                        "with this toolkit are not expected to run on this driver "
+                        "unless a CUDA forward-compatibility package is installed "
+                        "(datacenter GPUs only, per NVIDIA documentation)."
                     ),
                     evidence=[
                         f"toolkit (nvcc): CUDA {toolkit}",
-                        f"driver: {driver.version} (max CUDA {driver_max})",
+                        f"driver: {driver.version} (CUDA UMD version {driver_max})",
                     ],
                     recommendations=recommendations_for(self.code),
                 )
             ]
 
-        # Fallback: bundled minimum-driver table (uncertain -> cautious wording).
-        if driver_max is None and ctx.compatibility is not None:
-            installed = parse_driver_version(driver.version)
-            if installed is None:
-                return []
-            verdict = ctx.compatibility.driver.evaluate(toolkit, installed, ctx.platform)
-            if verdict.compatible is False:
-                return [
-                    self.issue(
-                        severity=Severity.WARNING,
-                        title="Potential driver/runtime compatibility issue",
-                        description=verdict.message,
-                        evidence=[
-                            f"toolkit (nvcc): CUDA {toolkit}",
-                            f"driver: {driver.version}",
-                        ],
-                        recommendations=recommendations_for(self.code),
-                    )
-                ]
+        # Driver below the NVIDIA-documented minimum for the toolkit's family.
+        if verdict is not None and verdict.compatible is False:
+            return [
+                self.issue(
+                    severity=Severity.ERROR,
+                    title="Driver is below the documented minimum for this CUDA generation",
+                    description=(
+                        f"{verdict.message} Applications built with CUDA {toolkit} "
+                        "may fail to run or initialize CUDA until the driver is "
+                        "updated (unless a CUDA forward-compatibility package is "
+                        "installed, datacenter GPUs only)."
+                    ),
+                    evidence=[
+                        f"toolkit (nvcc): CUDA {toolkit}",
+                        f"driver: {driver.version}",
+                        f"documented minimum for CUDA {toolkit.major}.x: "
+                        f"{'.'.join(str(p) for p in verdict.minimum_driver or ())}",
+                    ],
+                    recommendations=recommendations_for(self.code),
+                )
+            ]
+
+        # Same family, toolkit minor above the driver's UMD version, driver
+        # meets the family minimum -> minor-version compatibility applies.
+        if (
+            driver_max is not None
+            and driver_max.major == toolkit.major
+            and toolkit.minor > driver_max.minor
+            and verdict is not None
+            and verdict.compatible is True
+        ):
+            return [
+                self.issue(
+                    severity=Severity.INFO,
+                    title=(
+                        "Toolkit newer than the driver's CUDA version "
+                        "(minor-version compatibility)"
+                    ),
+                    description=(
+                        f"The local toolkit is CUDA {toolkit}, while the driver "
+                        f"({driver.version}) reports CUDA {driver_max} — the CUDA UMD "
+                        "version the driver was validated with. This is not a hard "
+                        "ceiling: CUDA minor-version compatibility allows "
+                        f"applications built with CUDA {toolkit} to run on drivers "
+                        f"from the same CUDA {toolkit.major}.x generation "
+                        "(the installed driver meets the documented family "
+                        "minimum). Newer driver-dependent features and PTX produced "
+                        "by the newer toolkit may still require a driver update."
+                    ),
+                    evidence=[
+                        f"toolkit (nvcc): CUDA {toolkit}",
+                        f"driver: {driver.version} (CUDA UMD version {driver_max})",
+                    ],
+                    recommendations=recommendations_for(self.code),
+                )
+            ]
+
+        # Everything else: toolkit within the driver's validated CUDA version,
+        # or not enough information — no verdict.
         return []

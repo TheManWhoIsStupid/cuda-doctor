@@ -1,7 +1,19 @@
-"""NVIDIA driver <-> CUDA toolkit compatibility rules.
+"""NVIDIA driver <-> CUDA compatibility rules.
 
-Data-driven from ``cuda_driver_compatibility.json``; never hardcoded at call
-sites so the table can be updated without touching logic.
+Data-driven from ``cuda_driver_compatibility.json``. The model follows
+NVIDIA's *CUDA minor-version compatibility* documentation (CUDA 11+):
+
+- compatibility is primarily determined by the CUDA **major family**;
+- an application built with a newer CUDA minor release runs on a driver
+  from the same major family, provided the driver meets the documented
+  family minimum (with caveats: newer driver-dependent features and newer
+  PTX may still fail);
+- the driver shipped with a toolkit release is a *different concept* from
+  the minor-compatibility minimum and is deliberately not stored here.
+
+Lookups are exact per major family: a CUDA family that is absent from the
+data (e.g. a future CUDA 14) is UNKNOWN — never inferred from an older
+family.
 """
 
 from __future__ import annotations
@@ -9,76 +21,96 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from cuda_doctor.compatibility._util import nearest_lower
 from cuda_doctor.core.enums import Platform
 from cuda_doctor.utils.versions import (
     CudaVersion,
     compare_versions,
     parse_driver_version,
-    parse_version,
 )
+
+_PLATFORM_KEYS = {
+    "linux": Platform.LINUX,
+    "windows": Platform.WINDOWS,
+}
 
 
 @dataclass(frozen=True)
 class DriverVerdict:
     """Outcome of a driver/toolkit comparison."""
 
-    compatible: bool | None  # None = cannot determine
+    compatible: bool | None  # None = cannot determine (UNKNOWN)
     minimum_driver: tuple[int, ...] | None
     message: str
 
 
 class DriverCompatibility:
-    """Minimum driver version per CUDA version, per platform."""
+    """Documented minimum driver per CUDA major family, per platform."""
 
     def __init__(
-        self, min_drivers: Mapping[Platform, Mapping[CudaVersion, tuple[int, ...]]]
+        self, family_minimums: Mapping[int, Mapping[Platform, tuple[int, ...]]]
     ) -> None:
-        self._table: dict[Platform, dict[CudaVersion, tuple[int, ...]]] = {
-            platform: dict(entries) for platform, entries in min_drivers.items()
+        self._families: dict[int, dict[Platform, tuple[int, ...]]] = {
+            major: dict(entries) for major, entries in family_minimums.items()
         }
 
     @classmethod
-    def from_json(cls, data: Mapping[str, Mapping[str, str]]) -> DriverCompatibility:
-        platform_keys = {
-            "linux": Platform.LINUX,
-            "windows": Platform.WINDOWS,
-        }
-        table: dict[Platform, dict[CudaVersion, tuple[int, ...]]] = {}
-        for key, platform in platform_keys.items():
-            section = data.get(key, {})
-            entries: dict[CudaVersion, tuple[int, ...]] = {}
-            for cuda_text, driver_text in section.items():
-                parts = parse_version(cuda_text)
-                if not parts or len(parts) < 2:
+    def from_json(cls, data: Mapping[str, object]) -> DriverCompatibility:
+        section = data.get("minor_version_compatibility", {})
+        families: dict[int, dict[Platform, tuple[int, ...]]] = {}
+        if isinstance(section, Mapping):
+            for family_text, platform_section in section.items():
+                if not family_text.isdigit():
                     continue
-                minimum = parse_driver_version(str(driver_text).lstrip(">="))
-                if minimum:
-                    entries[CudaVersion(parts[0], parts[1])] = minimum
-            table[platform] = entries
-        return cls(table)
+                entries = platform_section if isinstance(platform_section, Mapping) else {}
+                minimums: dict[Platform, tuple[int, ...]] = {}
+                for key, platform in _PLATFORM_KEYS.items():
+                    raw = entries.get(key)
+                    if isinstance(raw, str):
+                        minimum = parse_driver_version(raw.lstrip(">="))
+                        if minimum:
+                            minimums[platform] = minimum
+                if minimums:
+                    families[int(family_text)] = minimums
+        return cls(families)
 
-    def minimum_driver(
+    def family_minimum(
         self, cuda: CudaVersion, platform: Platform
     ) -> tuple[int, ...] | None:
-        table = self._table.get(platform, {})
-        return nearest_lower(table, cuda)
+        """Documented family minimum, or None when the family is unknown.
+
+        Exact major-family lookup only: a newer family never inherits an
+        older family's requirements, and an unknown minor within a known
+        family is covered by the family rule (that is what NVIDIA
+        documents).
+        """
+        family = self._families.get(cuda.major)
+        if family is None:
+            return None
+        return family.get(platform)
 
     def evaluate(
         self, cuda: CudaVersion, driver: tuple[int, ...], platform: Platform
     ) -> DriverVerdict:
-        minimum = self.minimum_driver(cuda, platform)
+        minimum = self.family_minimum(cuda, platform)
         if minimum is None:
             return DriverVerdict(
-                None, None, "No driver compatibility data for this CUDA version."
+                None,
+                None,
+                f"No NVIDIA-documented driver minimum for CUDA {cuda.major}.x on this "
+                "platform; compatibility is unknown.",
             )
         ok = compare_versions(driver, minimum) >= 0
         minimum_text = ".".join(str(part) for part in minimum)
+        driver_text = ".".join(str(part) for part in driver)
         if ok:
-            message = f"Driver meets the minimum ({minimum_text}) for CUDA {cuda}."
+            message = (
+                f"Driver {driver_text} meets the documented minimum ({minimum_text}) "
+                f"for CUDA {cuda.major}.x minor-version compatibility."
+            )
         else:
             message = (
-                f"CUDA {cuda} requires driver {minimum_text} or newer "
-                f"(installed: {'.'.join(str(p) for p in driver)})."
+                f"CUDA {cuda.major}.x requires driver {minimum_text} or newer for "
+                "minor-version compatibility "
+                f"(installed: {driver_text})."
             )
         return DriverVerdict(ok, minimum, message)

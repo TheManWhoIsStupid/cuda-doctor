@@ -1,41 +1,17 @@
 {
-  "comment": "Minimum NVIDIA driver version per CUDA toolkit version. Sources: NVIDIA CUDA Toolkit Release Notes (table 'CUDA Toolkit and Corresponding Driver Versions'). '>=X' marks the first driver branch supporting that toolkit; newer drivers are backwards compatible with older toolkits.",
-  "linux": {
-    "11.0": ">=450.36.06",
-    "11.1": ">=455.23",
-    "11.2": ">=460.27",
-    "11.3": ">=465.19",
-    "11.4": ">=470.42.01",
-    "11.5": ">=495.29.05",
-    "11.6": ">=510.39.01",
-    "11.7": ">=515.43.04",
-    "11.8": ">=520.61.05",
-    "12.0": ">=525.60.13",
-    "12.1": ">=530.30.02",
-    "12.2": ">=535.54.03",
-    "12.3": ">=545.23.06",
-    "12.4": ">=550.54.14",
-    "12.5": ">=555.42.02",
-    "12.6": ">=560.28.04",
-    "13.0": ">=580.65.06"
-  },
-  "windows": {
-    "11.0": ">=452.39",
-    "11.1": ">=456.38",
-    "11.2": ">=460.82",
-    "11.3": ">=465.89",
-    "11.4": ">=471.11",
-    "11.5": ">=496.04",
-    "11.6": ">=511.23",
-    "11.7": ">=516.01",
-    "11.8": ">=520.06",
-    "12.0": ">=527.41",
-    "12.1": ">=531.14",
-    "12.2": ">=536.25",
-    "12.3": ">=545.84",
-    "12.4": ">=551.61",
-    "12.5": ">=556.12",
-    "12.6": ">=560.76",
-    "13.0": ">=580.88"
+  "comment": "Minimum NVIDIA driver for CUDA minor-version compatibility, per CUDA major family and platform. Source: NVIDIA 'CUDA Compatibility' documentation (Minor Version Compatibility). NOTE: these are NOT the drivers bundled with each toolkit release (see the CUDA Toolkit Release Notes for that table) - they are the documented minimum driver below which an application built with any toolkit of that CUDA major family is not expected to run without a CUDA forward-compatibility package (datacenter GPUs only). Within a family, newer-minor toolkits run on these drivers subject to caveats: features requiring a newer driver and newer PTX may still fail. Values: 11.x per NVIDIA docs (Linux 450.80.02 / Windows 452.39, the R450 minor-compat baseline); 12.x per NVIDIA docs (Linux 525.60.13 / Windows 528.33, the R525/R528 baseline); 13.x: Linux 580.65.06 (R580 baseline, documented); Windows uses 580.88 - the driver shipped with CUDA 13.0 - because NVIDIA does not publish a separate Windows minor-compat minimum for CUDA 13.x. A CUDA major family absent from this table is UNKNOWN by design: no inference from older families.",
+  "minor_version_compatibility": {
+    "11": {
+      "linux": ">=450.80.02",
+      "windows": ">=452.39"
+    },
+    "12": {
+      "linux": ">=525.60.13",
+      "windows": ">=528.33"
+    },
+    "13": {
+      "linux": ">=580.65.06",
+      "windows": ">=580.88"
+    }
   }
 }

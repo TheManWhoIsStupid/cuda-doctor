@@ -327,6 +327,40 @@ class TestEnvironmentCollector:
         assert info.variables == {"CUDA_PATH": r"C:\CUDA\v12.4"}
         assert info.cuda_path_entries == [(0, r"C:\CUDA\v12.4\bin")]
 
+    def test_pathsep_follows_target_platform_not_host(self):
+        # The separator must come from the injected target platform, never
+        # from os.pathsep (each target is simulated on any host).
+        windows_path = r"C:\CUDA\v12.4\bin;C:\Windows"
+        linux_path = "/usr/local/cuda-12.4/bin:/usr/bin"
+
+        windows_target = EnvironmentCollector(
+            env={"PATH": windows_path}, platform=Platform.WINDOWS
+        ).collect()
+        assert windows_target.cuda_path_entries == [(0, r"C:\CUDA\v12.4\bin")]
+
+        linux_target = EnvironmentCollector(
+            env={"PATH": linux_path}, platform=Platform.LINUX
+        ).collect()
+        assert linux_target.cuda_path_entries == [(0, "/usr/local/cuda-12.4/bin")]
+
+        # A Linux-style PATH seen by a Windows target stays one unsplit
+        # entry (';' never occurs) — proving ';' was the separator used.
+        cross = EnvironmentCollector(
+            env={"PATH": linux_path}, platform=Platform.WINDOWS
+        ).collect()
+        assert cross.path_entries == [(0, linux_path)]
+
+        # A Windows-style PATH seen by a Linux target splits on ':' into
+        # drive-less fragments — proving ':' was the separator used.
+        cross = EnvironmentCollector(
+            env={"PATH": windows_path}, platform=Platform.LINUX
+        ).collect()
+        assert [entry for _, entry in cross.path_entries] == [
+            "C",
+            r"\CUDA\v12.4\bin;C",
+            r"\Windows",
+        ]
+
 
 class TestPythonEnvCollector:
     def test_system_python_outside_venv(self, monkeypatch):

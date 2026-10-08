@@ -146,14 +146,16 @@ class TestDriverChecks:
     def test_drv001_silent_without_gpus(self):
         assert run_check(DriverUndetermined, base_snapshot(gpus=[], driver=None)) == []
 
-    def test_drv002_error_when_toolkit_exceeds_driver_max(self):
+    def test_drv002_error_when_toolkit_generation_exceeds_driver(self):
+        # Cross-generation: toolkit 13.x on a CUDA 12.x driver is a real error.
         snapshot = base_snapshot()
         snapshot.cuda = replace(snapshot.cuda, toolkit_version="13.0")
         snapshot.driver = replace(snapshot.driver, version="550.54.14", cuda_version="12.4")
         issues = run_check(DriverRuntimeCompatibility, snapshot)
         assert len(issues) == 1
         assert issues[0].severity is Severity.ERROR
-        assert "at most CUDA 12.4" in issues[0].description
+        assert "newer CUDA generation" in issues[0].title
+        assert "forward-compatibility" in issues[0].description
 
     def test_drv002_silent_at_boundary(self):
         snapshot = base_snapshot()
@@ -161,15 +163,68 @@ class TestDriverChecks:
         snapshot.driver = replace(snapshot.driver, version="580.126.09", cuda_version="13.0")
         assert run_check(DriverRuntimeCompatibility, snapshot) == []
 
-    def test_drv002_warning_via_fallback_table(self):
-        # Driver max CUDA unknown -> fall back to the minimum-driver table.
+    def test_drv002_regression_same_family_minor_gap_is_not_an_error(self):
+        # Spec regression scenario 1: toolkit 12.6 + driver 535.x reporting
+        # CUDA 12.2. Minor-version compatibility applies (535 >= 525.60.13),
+        # so this must NOT be a hard ERROR — at most an INFO note.
+        snapshot = base_snapshot()
+        snapshot.cuda = replace(snapshot.cuda, toolkit_version="12.6")
+        snapshot.driver = replace(snapshot.driver, version="535.104.05", cuda_version="12.2")
+        issues = run_check(DriverRuntimeCompatibility, snapshot)
+        assert all(issue.severity is not Severity.ERROR for issue in issues)
+        assert all(issue.severity is not Severity.WARNING for issue in issues)
+        assert issues and issues[0].severity is Severity.INFO
+        assert "minor-version compatibility" in issues[0].description
+
+    def test_drv002_silent_when_driver_generation_is_newer(self):
+        # A CUDA 13 driver running a CUDA 12.4 toolkit is plain backward
+        # compatibility — no finding (this is the dev machine's situation).
         snapshot = base_snapshot()
         snapshot.cuda = replace(snapshot.cuda, toolkit_version="12.4")
-        snapshot.driver = replace(snapshot.driver, version="450.36.06", cuda_version=None)
+        snapshot.driver = replace(snapshot.driver, version="580.126.09", cuda_version="13.0")
+        assert run_check(DriverRuntimeCompatibility, snapshot) == []
+
+    def test_drv002_error_below_documented_family_minimum(self):
+        # No CUDA UMD version reported; the driver is far below the
+        # documented CUDA 12.x minimum (525.60.13) -> ERROR, worded on the
+        # documented minimum rather than a version ceiling.
+        snapshot = base_snapshot()
+        snapshot.cuda = replace(snapshot.cuda, toolkit_version="12.4")
+        snapshot.driver = replace(snapshot.driver, version="515.43.04", cuda_version=None)
         issues = run_check(DriverRuntimeCompatibility, snapshot)
         assert len(issues) == 1
-        assert issues[0].severity is Severity.WARNING
-        assert "Potential" in issues[0].title
+        assert issues[0].severity is Severity.ERROR
+        assert "525.60.13" in issues[0].description
+
+    def test_drv002_error_when_minor_compat_minimum_not_met(self):
+        # Windows edge: 527.41 reports max CUDA 12.0 but is below the CUDA
+        # 12.x minor-compat minimum (528.33), so toolkit 12.6 is an error.
+        snapshot = base_snapshot()
+        snapshot.system = replace(snapshot.system, platform=Platform.WINDOWS)
+        snapshot.cuda = replace(snapshot.cuda, toolkit_version="12.6")
+        snapshot.driver = replace(snapshot.driver, version="527.41", cuda_version="12.0")
+        issues = run_check(DriverRuntimeCompatibility, snapshot)
+        assert len(issues) == 1
+        assert issues[0].severity is Severity.ERROR
+        assert "528.33" in issues[0].description
+
+    def test_drv002_future_toolkit_major_cross_generation_still_detected(self):
+        # CUDA 14 toolkit vs a CUDA 13 driver: the mismatch is determinable
+        # from the driver's UMD version itself, without CUDA 14 tables.
+        snapshot = base_snapshot()
+        snapshot.cuda = replace(snapshot.cuda, toolkit_version="14.0")
+        snapshot.driver = replace(snapshot.driver, version="580.126.09", cuda_version="13.0")
+        issues = run_check(DriverRuntimeCompatibility, snapshot)
+        assert len(issues) == 1
+        assert issues[0].severity is Severity.ERROR
+
+    def test_drv002_future_toolkit_major_without_umd_is_silent(self):
+        # CUDA UMD version unknown AND CUDA 14 not in the knowledge base ->
+        # UNKNOWN, no guessed compatibility in either direction.
+        snapshot = base_snapshot()
+        snapshot.cuda = replace(snapshot.cuda, toolkit_version="14.0")
+        snapshot.driver = replace(snapshot.driver, version="580.126.09", cuda_version=None)
+        assert run_check(DriverRuntimeCompatibility, snapshot) == []
 
     def test_drv002_silent_without_driver(self):
         snapshot = base_snapshot(driver=None)
@@ -290,7 +345,7 @@ class TestPyTorchChecks:
         issues = run_check(PyTorchCudaUnavailable, snapshot)
         assert len(issues) == 1
         assert issues[0].severity is Severity.ERROR
-        assert any("driver supports" in e for e in issues[0].evidence)
+        assert any("CUDA UMD version" in e for e in issues[0].evidence)
 
     def test_torch002_silent_for_cpu_build(self):
         snapshot = base_snapshot()
@@ -326,12 +381,78 @@ class TestPyTorchChecks:
     def test_torch004_silent_when_equal(self):
         assert run_check(PyTorchRuntimeDiffers, base_snapshot()) == []
 
-    def test_torch006_error_when_torch_exceeds_driver(self):
+    def test_torch002_evidence_includes_family_minimum_when_below(self):
         snapshot = base_snapshot()
-        snapshot.driver = replace(snapshot.driver, version="535.104.05", cuda_version="12.2")
+        snapshot.driver = replace(snapshot.driver, version="515.43.04", cuda_version="11.8")
+        snapshot.pytorch = replace(snapshot.pytorch, cuda_available=False, devices=[])
+        issues = run_check(PyTorchCudaUnavailable, snapshot)
+        assert len(issues) == 1
+        assert any(
+            "below the documented minimum" in line and "525.60.13" in line
+            for line in issues[0].evidence
+        )
+
+    def test_torch002_evidence_explains_umd_version(self):
+        snapshot = base_snapshot()
+        snapshot.pytorch = replace(snapshot.pytorch, cuda_available=False, devices=[])
+        issues = run_check(PyTorchCudaUnavailable, snapshot)
+        assert any("CUDA UMD version" in line for line in issues[0].evidence)
+
+    def test_torch006_regression_no_error_when_cuda_actually_works(self):
+        # Spec regression scenario 2 / core invariant: torch 12.6 on a driver
+        # reporting CUDA 12.4, with torch.cuda.is_available() == True.
+        # Observed runtime success must never be contradicted by a static
+        # "cannot work" ERROR.
+        snapshot = base_snapshot()
+        snapshot.driver = replace(snapshot.driver, version="550.54.14", cuda_version="12.4")
+        snapshot.pytorch = replace(snapshot.pytorch, cuda_version="12.6")
+        assert run_check(PyTorchNewerThanDriver, snapshot) == []
+
+    def test_torch006_error_only_across_generations(self):
+        # torch built for CUDA 12 on a CUDA 11-generation driver, with CUDA
+        # observed unavailable -> the driver generation is the verdict.
+        snapshot = base_snapshot()
+        snapshot.driver = replace(snapshot.driver, version="470.42.01", cuda_version="11.4")
+        snapshot.pytorch = replace(
+            snapshot.pytorch, cuda_version="12.4", cuda_available=False, devices=[]
+        )
         issues = run_check(PyTorchNewerThanDriver, snapshot)
         assert len(issues) == 1
         assert issues[0].severity is Severity.ERROR
+        assert "newer generation" in issues[0].title
+        assert "forward-compatibility" in issues[0].description
+
+    def test_torch006_silent_across_generations_when_cuda_works(self):
+        # The invariant holds even for a genuine cross-generation gap:
+        # available=True wins over any static comparison.
+        snapshot = base_snapshot()
+        snapshot.driver = replace(snapshot.driver, version="470.42.01", cuda_version="11.4")
+        snapshot.pytorch = replace(snapshot.pytorch, cuda_version="12.4")
+        assert run_check(PyTorchNewerThanDriver, snapshot) == []
+
+    def test_torch006_error_below_documented_family_minimum(self):
+        # Same generation on paper (no UMD version), but the driver is below
+        # the documented CUDA 12.x minimum while torch reports CUDA unusable.
+        snapshot = base_snapshot()
+        snapshot.driver = replace(snapshot.driver, version="515.43.04", cuda_version=None)
+        snapshot.pytorch = replace(
+            snapshot.pytorch, cuda_available=False, devices=[]
+        )
+        issues = run_check(PyTorchNewerThanDriver, snapshot)
+        assert len(issues) == 1
+        assert issues[0].severity is Severity.ERROR
+        assert "525.60.13" in issues[0].description
+
+    def test_torch006_silent_for_same_family_minor_gap(self):
+        # torch 12.6 vs driver max 12.4 with CUDA unavailable: not TORCH006's
+        # business — minor-version compatibility applies and TORCH002 carries
+        # the diagnosis. No duplicate/contradictory finding here.
+        snapshot = base_snapshot()
+        snapshot.driver = replace(snapshot.driver, version="550.54.14", cuda_version="12.4")
+        snapshot.pytorch = replace(
+            snapshot.pytorch, cuda_version="12.6", cuda_available=False, devices=[]
+        )
+        assert run_check(PyTorchNewerThanDriver, snapshot) == []
 
     def test_torch006_silent_within_driver_support(self):
         assert run_check(PyTorchNewerThanDriver, base_snapshot()) == []

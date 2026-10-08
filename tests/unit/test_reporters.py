@@ -30,10 +30,13 @@ def inputs_for(snapshot) -> ReportInputs:
 
 
 def broken_inputs() -> ReportInputs:
-    """A snapshot with several real issues (import failure + CPU build path)."""
+    """A snapshot with several real issues (driver a generation too old)."""
     snapshot = base_snapshot()
-    snapshot.driver = replace(snapshot.driver, version="535.104.05", cuda_version="12.2")
+    # CUDA 11-generation driver with a CUDA 12.6 toolkit and a CUDA-12 torch
+    # build that cannot initialize CUDA: DRV002 + TORCH002 + TORCH006.
+    snapshot.driver = replace(snapshot.driver, version="470.42.01", cuda_version="11.4")
     snapshot.cuda = replace(snapshot.cuda, toolkit_version="12.6")
+    snapshot.pytorch = replace(snapshot.pytorch, cuda_available=False, devices=[])
     return inputs_for(snapshot)
 
 
@@ -76,8 +79,8 @@ class TestTerminalReporter:
 
     def test_issues_rendered_with_codes_and_recommendations(self):
         text = TerminalReporter().render(broken_inputs())
-        assert "TORCH006" in text  # torch cu124 > driver max 12.2
-        assert "DRV002" in text  # toolkit 12.6 > driver max 12.2
+        assert "TORCH006" in text  # torch cu124 vs CUDA 11-generation driver
+        assert "DRV002" in text  # toolkit 12.6 vs CUDA 11-generation driver
         assert "→" in text  # recommendation marker
         assert "DEGRADED" in text
 
@@ -91,6 +94,38 @@ class TestTerminalReporter:
         text = TerminalReporter().render(inputs_for(base_snapshot()))
         assert "2.6.0+cu124" in text
         assert "available, 1 device(s)" in text
+
+    def test_same_family_minor_gap_marked_info_not_error(self):
+        # Minor-version compatibility: toolkit 12.6 on a driver reporting
+        # CUDA 12.2 must carry the info mark, not the error mark.
+        snapshot = base_snapshot()
+        snapshot.driver = replace(snapshot.driver, version="535.216.01", cuda_version="12.2")
+        snapshot.cuda = replace(snapshot.cuda, toolkit_version="12.6")
+        text = TerminalReporter().render(inputs_for(snapshot))
+        line = next(ln for ln in text.splitlines() if "toolkit 12.6 vs driver" in ln)
+        assert "✗" not in line
+        assert line.strip().startswith(("i ", "INFO "))
+
+    def test_generation_gap_marked_error(self):
+        snapshot = base_snapshot()
+        snapshot.driver = replace(snapshot.driver, version="470.42.01", cuda_version="11.4")
+        snapshot.cuda = replace(snapshot.cuda, toolkit_version="12.6")
+        text = TerminalReporter().render(inputs_for(snapshot))
+        line = next(ln for ln in text.splitlines() if "toolkit 12.6 vs driver" in ln)
+        assert "✗" in line
+
+    def test_torch_row_green_when_cuda_observed_working(self):
+        # Observed runtime success outranks the static comparison: even a
+        # generation gap in the numbers must not show the error mark.
+        snapshot = base_snapshot()
+        snapshot.driver = replace(snapshot.driver, version="470.42.01", cuda_version="11.4")
+        snapshot.pytorch = replace(snapshot.pytorch, cuda_version="12.6")
+        text = TerminalReporter().render(inputs_for(snapshot))
+        line = next(
+            ln for ln in text.splitlines() if "torch runtime 12.6 vs driver" in ln
+        )
+        assert "✗" not in line
+        assert ("✓" in line) or ("OK" in line)
 
     def test_ascii_fallback_when_not_utf8(self):
         class Cp1252File(io.StringIO):

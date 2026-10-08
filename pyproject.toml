@@ -1,0 +1,92 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cuda-doctor"
+description = "Local CUDA / PyTorch development environment diagnostic tool"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "cuda-doctor contributors" }]
+keywords = ["cuda", "pytorch", "nvidia", "gpu", "diagnostics", "developer-tools"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: System :: Systems Administration",
+]
+dependencies = [
+    "typer>=0.9",
+    "rich>=13.0",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/TheManWhoIsStupid/cuda-doctor"
+Issues = "https://github.com/TheManWhoIsStupid/cuda-doctor/issues"
+Changelog = "https://github.com/TheManWhoIsStupid/cuda-doctor/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "ruff>=0.4",
+    "mypy>=1.8",
+    "pre-commit",
+]
+
+[project.scripts]
+cuda-doctor = "cuda_doctor.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "cuda_doctor.version.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+cuda_doctor = ["py.typed", "data/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["cuda_doctor"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "C4",  # comprehensions
+    "SIM", # simplify
+    "RUF", # ruff-specific
+]
+
+[tool.mypy]
+python_version = "3.10"
+mypy_path = "src"
+files = ["src"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+disallow_untyped_defs = true
+check_untyped_defs = true

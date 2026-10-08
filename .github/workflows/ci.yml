@@ -23,12 +23,13 @@ jobs:
       - name: Test
         shell: bash
         run: |
+          set +e  # runner bash runs with -e; keep going to report details
           pytest --tb=line -q > pytest.log 2>&1
           code=$?
           if [ $code -ne 0 ]; then
             summary=$(grep -E "^(FAILED|ERROR)" pytest.log | head -10)
             echo "::error::Failing tests:%0A${summary//$'\n'/%0A}"
-            tail_text=$(tail -c 2500 pytest.log)
+            tail_text=$(tail -c 900 pytest.log)
             echo "::error::pytest tail:%0A${tail_text//$'\n'/%0A}"
             exit $code
           fi

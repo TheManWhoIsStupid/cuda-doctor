@@ -44,7 +44,19 @@ class TestSystemCollector:
 
 
 class TestNvidiaSmiClient:
-    def test_happy_path(self, fixtures_dir):
+    @pytest.fixture()
+    def fake_smi_on_path(self, monkeypatch):
+        """Hermeticity: CI machines have no nvidia-smi to locate.
+
+        The client resolves the executable before consulting the injected
+        runner, so pretend it exists regardless of the host machine.
+        """
+        monkeypatch.setattr(
+            "cuda_doctor.collectors.nvidia_smi.find_executable",
+            lambda name: f"/fake/bin/{name}",
+        )
+
+    def test_happy_path(self, fixtures_dir, fake_smi_on_path):
         runner = FakeRunner(
             {
                 QUERY_GPU_ARGS: ok(load_fixture(fixtures_dir, "nvidia_smi/query_csv_single.txt")),
@@ -66,7 +78,7 @@ class TestNvidiaSmiClient:
         assert result.info.error == ERROR_NOT_FOUND
         assert result.info.available is False
 
-    def test_driver_failure_preserved_as_evidence(self, fixtures_dir):
+    def test_driver_failure_preserved_as_evidence(self, fixtures_dir, fake_smi_on_path):
         stderr = load_fixture(fixtures_dir, "nvidia_smi/stderr_failed.txt")
         runner = FakeRunner(default=failed(stderr, return_code=6))
         result = NvidiaSmiClient(runner).query()
@@ -74,7 +86,7 @@ class TestNvidiaSmiClient:
         assert result.info.executed is True
         assert result.info.stderr_excerpt and "NVIDIA-SMI has failed" in result.info.stderr_excerpt
 
-    def test_banner_fallback_when_xml_unparseable(self, fixtures_dir):
+    def test_banner_fallback_when_xml_unparseable(self, fixtures_dir, fake_smi_on_path):
         runner = FakeRunner(
             {
                 QUERY_GPU_ARGS: ok(load_fixture(fixtures_dir, "nvidia_smi/query_csv_single.txt")),
@@ -87,13 +99,13 @@ class TestNvidiaSmiClient:
         assert result.driver.version == "580.126.09"
         assert result.driver.source == "nvidia-smi"
 
-    def test_timeout(self):
+    def test_timeout(self, fake_smi_on_path):
         timeout_result = CommandResult(("<fake>",), None, "", "", "timeout")
         result = NvidiaSmiClient(FakeRunner(default=timeout_result)).query()
         assert result.gpus == []
         assert result.info.error == "timeout"
 
-    def test_old_driver_compute_cap_retry(self):
+    def test_old_driver_compute_cap_retry(self, fake_smi_on_path):
         old_driver_error = failed('Field "compute_cap" is not a valid field to be queried')
         retry_output = "0, NVIDIA Tesla V100-SXM2-32GB, GPU-abc, 32510 MiB"
         runner = FakeRunner(

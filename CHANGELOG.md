@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI (`cuda-doctor`, `cuda-doctor diagnose`, `cuda-doctor info`,
   `cuda-doctor --version`) with `--format terminal|json|markdown`, `--output`,
   and `--verbose` options.
+- Hermetic test suite (unit + end-to-end simulated machines; no GPU required)
+  with real nvidia-smi/nvcc parser fixtures captured from H20 and RTX 4090
+  machines.
+- Privacy-first reporting: home-directory and username redaction, no hostname
+  collection, CUDA-only PATH excerpts.
 - Read-only tool: never installs, uninstalls, or modifies anything.
 
 [Unreleased]: https://github.com/TheManWhoIsStupid/cuda-doctor/compare/v0.1.0...HEAD

@@ -1,0 +1,340 @@
+{
+  "schema_version": 1,
+  "tool": {
+    "name": "cuda-doctor",
+    "version": "0.1.0"
+  },
+  "generated_at": "2026-10-08T00:00:00+00:00",
+  "environment": {
+    "system": {
+      "os_name": "Linux",
+      "os_version": "Ubuntu 22.04.5 LTS",
+      "kernel_version": "5.15.0-91-generic",
+      "architecture": "x86_64",
+      "platform": "linux",
+      "python_version": "3.11.15",
+      "python_executable": "~/miniconda3/envs/flux/bin/python3.11"
+    },
+    "gpus": [
+      {
+        "index": 0,
+        "name": "NVIDIA H20-3e",
+        "uuid": "GPU-1827b3ab-5ea7-0628-de76-e34643d5edf7",
+        "memory_total_mb": 143771,
+        "compute_capability": "9.0"
+      },
+      {
+        "index": 1,
+        "name": "NVIDIA H20-3e",
+        "uuid": "GPU-6c71c1b8-4d8c-21d2-bc28-ca6c8baecd49",
+        "memory_total_mb": 143771,
+        "compute_capability": "9.0"
+      },
+      {
+        "index": 2,
+        "name": "NVIDIA H20-3e",
+        "uuid": "GPU-30d10606-b936-37ce-471e-ad161814bd82",
+        "memory_total_mb": 143771,
+        "compute_capability": "9.0"
+      },
+      {
+        "index": 3,
+        "name": "NVIDIA H20-3e",
+        "uuid": "GPU-98ed0cc9-3760-51e1-b2e4-d880a3a15342",
+        "memory_total_mb": 143771,
+        "compute_capability": "9.0"
+      },
+      {
+        "index": 4,
+        "name": "NVIDIA H20-3e",
+        "uuid": "GPU-c89fb989-f65e-ccc5-21c5-442138faefe1",
+        "memory_total_mb": 143771,
+        "compute_capability": "9.0"
+      },
+      {
+        "index": 5,
+        "name": "NVIDIA H20-3e",
+        "uuid": "GPU-1b2229e1-b844-cfb2-79b1-8d293bef17d5",
+        "memory_total_mb": 143771,
+        "compute_capability": "9.0"
+      },
+      {
+        "index": 6,
+        "name": "NVIDIA H20-3e",
+        "uuid": "GPU-7028e4c2-c40b-37c1-739f-aa28fd9cbe1d",
+        "memory_total_mb": 143771,
+        "compute_capability": "9.0"
+      },
+      {
+        "index": 7,
+        "name": "NVIDIA H20-3e",
+        "uuid": "GPU-b9176c9b-38ce-9f4e-59c5-e23bfc636b1e",
+        "memory_total_mb": 143771,
+        "compute_capability": "9.0"
+      }
+    ],
+    "driver": {
+      "version": "580.126.09",
+      "cuda_version": "13.0",
+      "source": "nvidia-smi -q -x"
+    },
+    "nvidia_smi": {
+      "available": true,
+      "executed": true,
+      "error": null,
+      "stdout_excerpt": "0, NVIDIA H20-3e, GPU-1827b3ab-5ea7-0628-de76-e34643d5edf7, 143771 MiB, 9.0\n1, NVIDIA H20-3e, GPU-6c71c1b8-4d8c-21d2-bc28-ca6c8baecd49, 143771 MiB, 9.0\n2, NVIDIA H20-3e, GPU-30d10606-b936-37ce-471e-ad161814bd82, 143771 MiB, 9.0\n3, NVIDIA H20-3e, GPU-98ed0cc9-3760-51e1-b2e4-d880a3a15342, 143771 MiB, 9.0\n4, NVIDIA H20-3e, GPU-c89fb989-f65e-ccc5-21c5-442138faefe1, 143771 MiB, 9.0\n5, NVIDIA H20-3e, GP",
+      "stderr_excerpt": null
+    },
+    "cuda": {
+      "nvcc_found": true,
+      "nvcc_path": "/usr/local/cuda-12.4/bin/nvcc",
+      "toolkit_version": "12.4",
+      "cuda_home": null,
+      "cuda_path": null,
+      "cuda_home_exists": null,
+      "cuda_home_has_nvcc": null,
+      "installations": [
+        {
+          "path": "/usr/local/cuda-12.9",
+          "version": "12.9"
+        },
+        {
+          "path": "/usr/local/cuda-12.8",
+          "version": "12.8"
+        },
+        {
+          "path": "/usr/local/cuda-12.6",
+          "version": "12.6"
+        },
+        {
+          "path": "/usr/local/cuda-12.4",
+          "version": "12.4"
+        },
+        {
+          "path": "/usr/local/cuda",
+          "version": null
+        }
+      ],
+      "windows_cuda_path_vars": {}
+    },
+    "python": {
+      "version": "3.11.15",
+      "executable": "~/miniconda3/envs/flux/bin/python3.11",
+      "in_virtual_env": false,
+      "virtual_env_path": null,
+      "pip_version": "26.0.1"
+    },
+    "pytorch": {
+      "installed": true,
+      "version": "2.6.0+cu124",
+      "cuda_version": "12.4",
+      "is_cuda_build": true,
+      "cuda_available": true,
+      "device_count": 8,
+      "cudnn_version": "90100",
+      "devices": [
+        {
+          "index": 0,
+          "name": "NVIDIA H20-3e",
+          "compute_capability": "9.0"
+        },
+        {
+          "index": 1,
+          "name": "NVIDIA H20-3e",
+          "compute_capability": "9.0"
+        },
+        {
+          "index": 2,
+          "name": "NVIDIA H20-3e",
+          "compute_capability": "9.0"
+        },
+        {
+          "index": 3,
+          "name": "NVIDIA H20-3e",
+          "compute_capability": "9.0"
+        },
+        {
+          "index": 4,
+          "name": "NVIDIA H20-3e",
+          "compute_capability": "9.0"
+        },
+        {
+          "index": 5,
+          "name": "NVIDIA H20-3e",
+          "compute_capability": "9.0"
+        },
+        {
+          "index": 6,
+          "name": "NVIDIA H20-3e",
+          "compute_capability": "9.0"
+        },
+        {
+          "index": 7,
+          "name": "NVIDIA H20-3e",
+          "compute_capability": "9.0"
+        }
+      ],
+      "import_error": null
+    },
+    "compiler": {
+      "compilers": [
+        {
+          "name": "gcc",
+          "found": true,
+          "path": "/usr/bin/gcc",
+          "version": "11.4.0"
+        },
+        {
+          "name": "g++",
+          "found": true,
+          "path": "/usr/bin/g++",
+          "version": "11.4.0"
+        },
+        {
+          "name": "clang",
+          "found": false,
+          "path": null,
+          "version": null
+        },
+        {
+          "name": "clang++",
+          "found": false,
+          "path": null,
+          "version": null
+        }
+      ]
+    },
+    "cmake": {
+      "name": "cmake",
+      "found": true,
+      "path": "/usr/bin/cmake",
+      "version": "3.22.1"
+    },
+    "ninja": {
+      "name": "ninja",
+      "found": true,
+      "path": "~/miniconda3/envs/flux/bin/ninja",
+      "version": "1.13.0"
+    },
+    "environment": {
+      "variables": {},
+      "path_entries": [
+        [
+          0,
+          "~/.npm-global/bin"
+        ],
+        [
+          1,
+          "/usr/local/NVIDIA-Nsight-Compute-2025.4"
+        ],
+        [
+          2,
+          "~/miniconda3/envs/flux/bin"
+        ],
+        [
+          3,
+          "~/miniconda3/condabin"
+        ],
+        [
+          4,
+          "/usr/local/cuda-12.4/bin"
+        ],
+        [
+          5,
+          "/usr/local/sbin"
+        ],
+        [
+          6,
+          "/usr/local/bin"
+        ],
+        [
+          7,
+          "/usr/sbin"
+        ],
+        [
+          8,
+          "/usr/bin"
+        ],
+        [
+          9,
+          "/sbin"
+        ],
+        [
+          10,
+          "/bin"
+        ],
+        [
+          11,
+          "/usr/games"
+        ],
+        [
+          12,
+          "/usr/local/games"
+        ],
+        [
+          13,
+          "/snap/bin"
+        ],
+        [
+          14,
+          "/opt/mellanox/doca/tools"
+        ],
+        [
+          15,
+          "/opt/mellanox/grpc/bin"
+        ]
+      ],
+      "cuda_path_entries": [
+        [
+          4,
+          "/usr/local/cuda-12.4/bin"
+        ]
+      ],
+      "ld_library_path": "~/nccl/lib:/usr/local/cuda-12.4/lib64:",
+      "cuda_ld_library_entries": [
+        "/usr/local/cuda-12.4/lib64"
+      ]
+    },
+    "collection_errors": {},
+    "collected_at": "2026-10-08T00:00:00+00:00"
+  },
+  "issues": [
+    {
+      "code": "CUDA002",
+      "severity": "INFO",
+      "title": "CUDA_HOME / CUDA_PATH not set",
+      "description": "No CUDA_HOME (Linux) or CUDA_PATH (Windows) variable is set. This is optional — builds that need it usually configure it themselves — but some tools look for it.",
+      "evidence": [
+        "CUDA_HOME and CUDA_PATH are unset"
+      ],
+      "recommendations": [
+        "Set CUDA_HOME (Linux) / CUDA_PATH (Windows) to your toolkit directory if build tools need it; many workflows run fine without it."
+      ],
+      "category": "cuda"
+    },
+    {
+      "code": "CUDA004",
+      "severity": "INFO",
+      "title": "Multiple CUDA Toolkit installations detected",
+      "description": "Several CUDA Toolkit versions are installed. That is common and not a problem by itself — just be deliberate about which one PATH and CUDA_HOME select.",
+      "evidence": [
+        "CUDA 12.9: /usr/local/cuda-12.9",
+        "CUDA 12.8: /usr/local/cuda-12.8",
+        "CUDA 12.6: /usr/local/cuda-12.6",
+        "CUDA 12.4: /usr/local/cuda-12.4"
+      ],
+      "recommendations": [
+        "Multiple toolkits are fine; just make sure PATH/CUDA_HOME deliberately select the one you intend to use."
+      ],
+      "category": "cuda"
+    }
+  ],
+  "summary": {
+    "critical": 0,
+    "errors": 0,
+    "warnings": 0,
+    "info": 2,
+    "status": "HEALTHY"
+  },
+  "check_errors": {}
+}

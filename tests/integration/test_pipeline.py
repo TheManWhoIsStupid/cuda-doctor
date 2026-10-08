@@ -147,8 +147,14 @@ def healthy_runner(fixtures, nvcc: str = NVCC) -> FakeRunner:
 
 
 @pytest.fixture()
-def healthy_environment(tmp_path):
+def healthy_environment(tmp_path, monkeypatch):
     """A coherent on-disk world: CUDA_HOME exists and holds bin/nvcc."""
+    # The simulated machine is Linux, so PATH is ":"-joined. On a Windows
+    # host that split also cuts the drive colon out of tmp_path-based
+    # entries ("\Users\..."), which then resolve against the *current*
+    # drive. chdir onto the tmp drive so those fragments exist either way;
+    # on POSIX hosts absolute paths make the chdir a no-op for the tests.
+    monkeypatch.chdir(tmp_path)
     toolkit = tmp_path / "toolkits" / "cuda-12.4"
     (toolkit / "bin").mkdir(parents=True)
     (toolkit / "bin" / "nvcc").write_text("#!/bin/sh\n", encoding="utf-8")

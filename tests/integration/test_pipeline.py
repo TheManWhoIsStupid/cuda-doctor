@@ -9,7 +9,7 @@ from tests.conftest import FakeRunner, load_fixture, ok
 from typer.testing import CliRunner
 
 from cuda_doctor.cli import app
-from cuda_doctor.core.enums import EnvironmentStatus
+from cuda_doctor.core.enums import EnvironmentStatus, Platform
 from cuda_doctor.core.runner import CollectionRunner
 from cuda_doctor.diagnosis.engine import DiagnosisEngine
 from cuda_doctor.reporters import JsonReporter, MarkdownReporter, ReportInputs
@@ -175,6 +175,7 @@ class TestHealthyMachine:
         paths, runner = healthy_setup(fixtures, toolkit)
         patch_executables(paths)
         snapshot = CollectionRunner(
+            platform=Platform.LINUX,
             command_runner=runner,
             env=env,
             roots=roots,
@@ -197,6 +198,7 @@ class TestHealthyMachine:
         paths, runner = healthy_setup(fixtures, toolkit)
         patch_executables(paths)
         snapshot = CollectionRunner(
+            platform=Platform.LINUX,
             command_runner=runner,
             env=env,
             roots=roots,
@@ -217,6 +219,7 @@ class TestBrokenMachine:
     def test_missing_everything(self, patch_executables, tmp_path):
         patch_executables({})  # nothing on PATH at all
         snapshot = CollectionRunner(
+            platform=Platform.LINUX,
             command_runner=FakeRunner(),
             env={"PATH": "/nonexistent", "CUDA_HOME": str(tmp_path / "gone" / "cuda")},
             roots=(str(tmp_path),),
@@ -235,6 +238,7 @@ class TestBrokenMachine:
     def test_import_failure_matches_known_issue(self, patch_executables, tmp_path):
         patch_executables({})
         snapshot = CollectionRunner(
+            platform=Platform.LINUX,
             command_runner=FakeRunner(),
             env={"PATH": "/nonexistent"},
             roots=(str(tmp_path),),
@@ -252,6 +256,7 @@ class TestBrokenMachine:
 
         def fake_collect():
             return CollectionRunner(
+                platform=Platform.LINUX,
                 command_runner=FakeRunner(),
                 env={"PATH": "/nonexistent", "CUDA_HOME": str(tmp_path / "gone" / "cuda")},
                 roots=(str(tmp_path),),
@@ -274,6 +279,7 @@ class TestCpuOnlyMachine:
         paths, runner = healthy_setup(fixtures, toolkit)
         patch_executables(paths)
         snapshot = CollectionRunner(
+            platform=Platform.LINUX,
             command_runner=runner,
             env=env,
             roots=roots,
@@ -298,6 +304,7 @@ class TestMultiToolkitMachine:
             "CUDA_HOME": str(tmp_path / "cuda-11.8"),
         }
         snapshot = CollectionRunner(
+            platform=Platform.LINUX,
             command_runner=healthy_runner(fixtures, nvcc),
             env=env,
             roots=(str(tmp_path),),

@@ -77,13 +77,16 @@ class TestWindowsCompilerCollector:
         assert by_name["Visual Studio (vswhere)"].found is True
         assert by_name["cl"].found is True
 
-    def test_vswhere_missing_and_cl_absent(self, monkeypatch):
+    def test_vswhere_missing_and_cl_absent(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
             "cuda_doctor.collectors.find_executable", lambda name: None
         )
+        # Point ProgramFiles(x86) at a real (empty) dir: hardcoding
+        # C:\Program Files (x86) leaks the host state — Windows runners
+        # have a real vswhere.exe there, so absence could not be simulated.
         info = CompilerCollector(
             runner=FakeRunner(),
-            env={"ProgramFiles(x86)": r"C:\Program Files (x86)"},
+            env={"ProgramFiles(x86)": str(tmp_path)},
             platform=Platform.WINDOWS,
         ).collect()
         # Only the cl probe ran; vswhere was not on disk.

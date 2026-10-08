@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from cuda_doctor.core.enums import Platform
 from cuda_doctor.core.runner import CollectionRunner
 
 
@@ -35,6 +36,7 @@ def test_injected_dependencies_flow_through(tmp_path, monkeypatch):
     )
     (tmp_path / "cuda-12.4").mkdir()
     snapshot = CollectionRunner(
+        platform=Platform.LINUX,
         env={"PATH": "/usr/bin", "CUDA_HOME": str(tmp_path / "cuda-12.4")},
         roots=(str(tmp_path),),
     ).collect()

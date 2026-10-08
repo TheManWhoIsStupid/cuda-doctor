@@ -138,8 +138,7 @@ class TestTerminalReporter:
         assert "ERR" in text
         assert "✗" not in text
 
-    def test_home_paths_redacted(self, monkeypatch):
-        monkeypatch.setenv("HOME", "/home/secretuser")
+    def test_home_paths_redacted(self, fake_home):
         snapshot = base_snapshot()
         snapshot.system = replace(
             snapshot.system, python_executable="/home/secretuser/venv/bin/python"
@@ -183,8 +182,7 @@ class TestJsonReporter:
         assert payload["summary"]["status"] == "DEGRADED"
         assert payload["summary"]["errors"] >= 2
 
-    def test_snapshot_redacted(self, monkeypatch):
-        monkeypatch.setenv("HOME", "/home/secretuser")
+    def test_snapshot_redacted(self, fake_home):
         snapshot = base_snapshot()
         snapshot.system = replace(
             snapshot.system, python_executable="/home/secretuser/venv/bin/python"
@@ -214,8 +212,7 @@ class TestJsonReporter:
         # The CUDA-relevant subsets remain.
         assert "cuda_path_entries" in env
 
-    def test_check_errors_are_redacted(self, monkeypatch):
-        monkeypatch.setenv("HOME", "/home/secretuser")
+    def test_check_errors_are_redacted(self, fake_home):
         inputs = inputs_for(base_snapshot())
         inputs.result.check_errors["ExplodingCheck"] = (
             "RuntimeError: boom at /home/secretuser/venv/lib/libtorch.so"
@@ -241,8 +238,7 @@ class TestMarkdownReporter:
         assert "**Evidence**" in text
         assert "DEGRADED" in text
 
-    def test_redacted(self, monkeypatch):
-        monkeypatch.setenv("HOME", "/home/secretuser")
+    def test_redacted(self, fake_home):
         snapshot = base_snapshot()
         snapshot.system = replace(
             snapshot.system, python_executable="/home/secretuser/venv/bin/python"

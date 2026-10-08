@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from cuda_doctor.core.enums import Platform
 from cuda_doctor.utils.paths import (
     discover_cuda_installations,
@@ -26,7 +28,8 @@ class TestDiscoverLinux:
         assert len(installs) == 3
         assert paths[0].endswith("cuda-12.4")
         assert paths[1].endswith("cuda-11.8")
-        assert any(p.endswith("/cuda") for p in paths)
+        # Separator-agnostic: on a Windows host the discovered paths use "\"."
+        assert any(Path(p).name == "cuda" for p in paths)
         by_name = {install.path: install for install in installs}
         assert by_name[str(tmp_path / "cuda-12.4")].version == "12.4"
         assert by_name[str(tmp_path / "cuda")].version is None

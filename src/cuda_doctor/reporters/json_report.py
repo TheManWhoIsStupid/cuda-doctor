@@ -7,6 +7,7 @@ from typing import Any
 
 from cuda_doctor.core.models import snapshot_to_dict
 from cuda_doctor.reporters.base import Reporter, ReportInputs
+from cuda_doctor.utils.redact import redact_value
 from cuda_doctor.version import __version__
 
 SCHEMA_VERSION = 1
@@ -29,5 +30,6 @@ class JsonReporter(Reporter):
             "environment": snapshot_to_dict(inputs.snapshot, redact=True),
             "issues": [issue.to_dict(redact=True) for issue in result.issues],
             "summary": result.summary.to_dict(),
-            "check_errors": dict(result.check_errors),
+            # Exception texts can embed absolute paths — redact like the rest.
+            "check_errors": redact_value(dict(result.check_errors)),
         }

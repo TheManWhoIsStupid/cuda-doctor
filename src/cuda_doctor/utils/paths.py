@@ -9,7 +9,7 @@ from pathlib import Path
 
 from cuda_doctor.core.enums import Platform
 from cuda_doctor.core.models import CUDAInstallation
-from cuda_doctor.utils.versions import cuda_version_from_path
+from cuda_doctor.utils.versions import cuda_version_from_path, parse_cuda_version
 
 LINUX_CUDA_ROOT_DIRS = ("/usr/local", "/opt")
 WINDOWS_TOOLKIT_ROOT = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
@@ -90,7 +90,10 @@ def discover_cuda_installations(
                 _add(str(entry))
 
     def _sort_key(install: CUDAInstallation) -> tuple[tuple[int, int], str]:
-        version = cuda_version_from_path(install.version or "") or (0, 0)
+        # ``install.version`` is a bare "major.minor" string (see _add above),
+        # so parse it directly — the path-oriented regex would never match it
+        # and every install would sort as (0, 0), i.e. by path text.
+        version = parse_cuda_version(install.version) or (0, 0)
         return (version, install.path)
 
     return sorted(found.values(), key=_sort_key, reverse=True)

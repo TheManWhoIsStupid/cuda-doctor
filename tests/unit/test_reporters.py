@@ -37,6 +37,20 @@ def broken_inputs() -> ReportInputs:
     return inputs_for(snapshot)
 
 
+def torch_import_error_inputs() -> ReportInputs:
+    snapshot = base_snapshot()
+    snapshot.pytorch = replace(
+        snapshot.pytorch,
+        installed=True,
+        import_error="RuntimeError: libcuda.so.1: cannot open shared object file",
+        is_cuda_build=None,
+        cuda_available=None,
+        device_count=None,
+        devices=[],
+    )
+    return inputs_for(snapshot)
+
+
 class TestTerminalReporter:
     def test_renders_all_sections(self):
         text = TerminalReporter().render(inputs_for(base_snapshot()))
@@ -98,6 +112,13 @@ class TestTerminalReporter:
         text = TerminalReporter().render(inputs_for(snapshot))
         assert "secretuser" not in text
 
+    def test_torch_import_error_rendered(self):
+        text = TerminalReporter().render(torch_import_error_inputs())
+        assert "installed but cannot be imported" in text
+        assert "Import error" in text
+        assert "libcuda.so.1" in text
+        assert "TORCH005" in text  # issue section picks it up too
+
     def test_internal_errors_surfaced(self):
         snapshot = base_snapshot()
         snapshot.collection_errors = {"pytorch": "Boom: broken"}
@@ -142,6 +163,31 @@ class TestJsonReporter:
         inputs.result.check_errors["compatibility-data"] = "unreadable"
         payload = JsonReporter.build(inputs)
         assert payload["check_errors"] == {"compatibility-data": "unreadable"}
+
+    def test_full_path_and_ld_library_path_never_dumped(self):
+        snapshot = base_snapshot()
+        snapshot.environment = replace(
+            snapshot.environment,
+            path_entries=[(0, "/home/secretuser/.npm-global/bin"), (1, "/usr/bin")],
+            ld_library_path="/home/secretuser/.local/lib:/usr/lib",
+        )
+        payload = JsonReporter.build(inputs_for(snapshot))
+        env = payload["environment"]["environment"]
+        assert "path_entries" not in env
+        assert "ld_library_path" not in env
+        assert ".npm-global" not in JsonReporter().render(inputs_for(snapshot))
+        # The CUDA-relevant subsets remain.
+        assert "cuda_path_entries" in env
+
+    def test_check_errors_are_redacted(self, monkeypatch):
+        monkeypatch.setenv("HOME", "/home/secretuser")
+        inputs = inputs_for(base_snapshot())
+        inputs.result.check_errors["ExplodingCheck"] = (
+            "RuntimeError: boom at /home/secretuser/venv/lib/libtorch.so"
+        )
+        rendered = JsonReporter().render(inputs)
+        assert "secretuser" not in rendered
+        assert "<user>" in rendered or "~" in rendered
 
 
 class TestMarkdownReporter:

@@ -218,79 +218,12 @@
     },
     "environment": {
       "variables": {},
-      "path_entries": [
-        [
-          0,
-          "~/.npm-global/bin"
-        ],
-        [
-          1,
-          "/usr/local/NVIDIA-Nsight-Compute-2025.4"
-        ],
-        [
-          2,
-          "~/miniconda3/envs/flux/bin"
-        ],
-        [
-          3,
-          "~/miniconda3/condabin"
-        ],
-        [
-          4,
-          "/usr/local/cuda-12.4/bin"
-        ],
-        [
-          5,
-          "/usr/local/sbin"
-        ],
-        [
-          6,
-          "/usr/local/bin"
-        ],
-        [
-          7,
-          "/usr/sbin"
-        ],
-        [
-          8,
-          "/usr/bin"
-        ],
-        [
-          9,
-          "/sbin"
-        ],
-        [
-          10,
-          "/bin"
-        ],
-        [
-          11,
-          "/usr/games"
-        ],
-        [
-          12,
-          "/usr/local/games"
-        ],
-        [
-          13,
-          "/snap/bin"
-        ],
-        [
-          14,
-          "/opt/mellanox/doca/tools"
-        ],
-        [
-          15,
-          "/opt/mellanox/grpc/bin"
-        ]
-      ],
       "cuda_path_entries": [
         [
           4,
           "/usr/local/cuda-12.4/bin"
         ]
       ],
-      "ld_library_path": "~/nccl/lib:/usr/local/cuda-12.4/lib64:",
       "cuda_ld_library_entries": [
         "/usr/local/cuda-12.4/lib64"
       ]

@@ -8,7 +8,7 @@ from cuda_doctor.core.enums import Severity
 from cuda_doctor.core.models import EnvironmentSnapshot
 from cuda_doctor.diagnosis.engine import DiagnosisResult
 from cuda_doctor.diagnosis.issue import Issue
-from cuda_doctor.reporters.base import Reporter, ReportInputs
+from cuda_doctor.reporters.base import Reporter, ReportInputs, format_memory
 from cuda_doctor.utils.redact import redact_text
 from cuda_doctor.version import __version__
 
@@ -59,12 +59,12 @@ class MarkdownReporter(Reporter):
             names = {gpu.name for gpu in snapshot.gpus}
             if len(names) == 1:
                 gpu = snapshot.gpus[0]
-                memory = _format_memory(gpu.memory_total_mb)
+                memory = format_memory(gpu.memory_total_mb)
                 each = f" ({memory} each)" if memory else ""
                 add(f"- **GPU(s)**: {len(snapshot.gpus)} x {gpu.name}{each}")
             else:
                 devices = ", ".join(
-                    f"{gpu.name} {_format_memory(gpu.memory_total_mb)}".rstrip()
+                    f"{gpu.name} {format_memory(gpu.memory_total_mb)}".rstrip()
                     for gpu in snapshot.gpus
                 )
                 add(f"- **GPU(s)**: {devices}")
@@ -147,7 +147,3 @@ class MarkdownReporter(Reporter):
             f"{summary.warnings} warnings · {summary.info} info"
         )
         add("")
-
-
-def _format_memory(memory_mb: int | None) -> str:
-    return f"{memory_mb / 1024:.1f} GiB" if memory_mb else ""

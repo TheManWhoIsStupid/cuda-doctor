@@ -30,16 +30,22 @@ class EnvironmentCollector:
 
     def collect(self) -> EnvironmentInfo:
         info = EnvironmentInfo()
-        upper = {key.upper(): value for key, value in self.env.items()}
+        # Environment names are case-insensitive only on Windows; folding them
+        # everywhere else would conflate distinct Linux variables (e.g. a
+        # lowercase ``cuda_home`` is NOT CUDA_HOME on Linux).
+        if self.platform is Platform.WINDOWS:
+            lookup = {key.upper(): value for key, value in self.env.items()}
+        else:
+            lookup = self.env
 
         for name in SCALAR_VARIABLES:
-            if upper.get(name):
-                info.variables[name] = upper[name]
-        for key, value in sorted(upper.items()):
+            if lookup.get(name):
+                info.variables[name] = lookup[name]
+        for key, value in sorted(lookup.items()):
             if key.startswith("CUDA_PATH_V") and value:
                 info.variables[key] = value
 
-        for index, entry in enumerate(upper.get("PATH", "").split(self._pathsep())):
+        for index, entry in enumerate(lookup.get("PATH", "").split(self._pathsep())):
             if not entry:
                 continue
             info.path_entries.append((index, entry))
@@ -47,7 +53,7 @@ class EnvironmentCollector:
                 info.cuda_path_entries.append((index, entry))
 
         if self.platform is not Platform.WINDOWS:
-            ld = upper.get("LD_LIBRARY_PATH")
+            ld = lookup.get("LD_LIBRARY_PATH")
             if ld is not None:
                 info.ld_library_path = ld
                 info.cuda_ld_library_entries = [

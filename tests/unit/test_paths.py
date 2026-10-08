@@ -31,6 +31,14 @@ class TestDiscoverLinux:
         assert by_name[str(tmp_path / "cuda-12.4")].version == "12.4"
         assert by_name[str(tmp_path / "cuda")].version is None
 
+    def test_single_digit_versions_sort_numerically(self, tmp_path):
+        # Lexicographic order would rank cuda-9.0 above cuda-10.0; the sort
+        # must compare parsed versions instead.
+        for name in ("cuda-9.0", "cuda-10.0", "cuda-11.8", "cuda-12.4"):
+            (tmp_path / name).mkdir()
+        installs = discover_cuda_installations(Platform.LINUX, roots=(str(tmp_path),))
+        assert [install.version for install in installs] == ["12.4", "11.8", "10.0", "9.0"]
+
     def test_missing_root(self):
         assert discover_cuda_installations(Platform.LINUX, roots=("/definitely/not/here",)) == []
 

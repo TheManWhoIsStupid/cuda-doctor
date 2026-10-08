@@ -16,15 +16,3 @@ def current_platform() -> Platform:
     if sys.platform.startswith("darwin"):
         return Platform.MACOS
     return Platform.OTHER
-
-
-def is_windows() -> bool:
-    return current_platform() is Platform.WINDOWS
-
-
-def is_linux() -> bool:
-    return current_platform() is Platform.LINUX
-
-
-def is_macos() -> bool:
-    return current_platform() is Platform.MACOS

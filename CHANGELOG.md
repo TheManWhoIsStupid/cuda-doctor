@@ -32,5 +32,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collection, CUDA-only PATH excerpts.
 - Read-only tool: never installs, uninstalls, or modifies anything.
 
+### Fixed
+
+Self-review hardening pass:
+- JSON reports no longer embed the full `PATH` / raw `LD_LIBRARY_PATH`
+  (only the CUDA-relevant subsets, as documented) and now redact
+  `check_errors` texts like every other field.
+- Toolkit installations sort by parsed version, not path text
+  (single-digit versions such as CUDA 9.0 vs 10.0 previously misordered).
+- A corrupted PyTorch install (e.g. missing `torch._C`) is reported as
+  "installed but broken" instead of "not installed".
+- Environment-variable names are case-insensitive on Windows only; lowercase
+  Linux variables are no longer conflated with their uppercase forms.
+- Unwritable `--output` paths and renderer failures exit with a friendly
+  message (code 2) instead of a traceback.
+- Internal check errors are keyed by check class, so two checks sharing an
+  issue code can no longer overwrite each other's diagnostics.
+
 [Unreleased]: https://github.com/TheManWhoIsStupid/cuda-doctor/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/TheManWhoIsStupid/cuda-doctor/releases/tag/v0.1.0

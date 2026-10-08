@@ -46,7 +46,13 @@ class CUDACollector:
         return info
 
     def _collect_env_vars(self, info: CUDAInfo) -> None:
-        env = {key.upper(): value for key, value in self.env.items()}
+        # Case-insensitive lookups are correct on Windows only (see
+        # EnvironmentCollector for the Linux rationale).
+        env = (
+            {key.upper(): value for key, value in self.env.items()}
+            if self.platform is Platform.WINDOWS
+            else self.env
+        )
         info.windows_cuda_path_vars = {
             key: value for key, value in env.items() if key.startswith("CUDA_PATH_V") and value
         }

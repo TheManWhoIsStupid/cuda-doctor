@@ -113,8 +113,20 @@ class TestEngine:
         snapshot = base_snapshot()
         snapshot.compiler = replace(snapshot.compiler, compilers=[])
         result = engine.run(snapshot)
-        assert result.check_errors == {"XXX001": "RuntimeError: boom"}
+        # Errors are keyed by check class name, not issue code.
+        assert result.check_errors == {"ExplodingCheck": "RuntimeError: boom"}
         assert [issue.code for issue in result.issues] == ["CMP001"]
+
+    def test_two_crashing_checks_sharing_a_code_are_both_recorded(self):
+        class AlsoExploding(ExplodingCheck):
+            def run(self, ctx) -> list[Issue]:
+                raise ValueError("different failure")
+
+        engine = DiagnosisEngine(checks=[ExplodingCheck(), AlsoExploding()])
+        result = engine.run(base_snapshot())
+        assert set(result.check_errors) == {"ExplodingCheck", "AlsoExploding"}
+        assert "RuntimeError: boom" in result.check_errors["ExplodingCheck"]
+        assert "ValueError: different failure" in result.check_errors["AlsoExploding"]
 
     def test_compatibility_load_failure_is_recorded_not_fatal(self, monkeypatch):
         def broken():

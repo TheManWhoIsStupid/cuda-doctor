@@ -79,6 +79,18 @@ class TestDiagnose:
         assert "# CUDA Doctor Report" in result.output
         assert "## Summary" in result.output
 
+    def test_unwritable_output_path_exits_cleanly(self, fake_collect, tmp_path):
+        # A bad --output must degrade to a friendly message + exit 2,
+        # never a traceback (safe failure over crashes).
+        fake_collect(base_snapshot())
+        missing_dir = tmp_path / "no" / "such" / "dir" / "report.md"
+        result = runner.invoke(
+            app, ["diagnose", "--format", "markdown", "--output", str(missing_dir)]
+        )
+        assert result.exit_code == 2
+        assert "Internal error while producing the report" in result.output
+        # A traceback would surface as exit code 1, not this clean exit 2.
+
     def test_output_writes_file(self, fake_collect, tmp_path):
         fake_collect(base_snapshot())
         target = tmp_path / "report.md"

@@ -214,8 +214,16 @@ def snapshot_to_dict(
     With ``redact=True`` (default) all embedded strings are redacted using
     ``home`` (or the current home directory). With ``redact=False`` values are
     only normalized (enums to values, tuples to lists).
+
+    The full ``PATH`` and raw ``LD_LIBRARY_PATH`` are never included: reports
+    must stay shareable, so only the CUDA-relevant subsets analyzed in
+    ``cuda_path_entries`` / ``cuda_ld_library_entries`` are emitted.
     """
     data = asdict(snapshot)
+    environment = data.get("environment")
+    if isinstance(environment, dict):
+        environment.pop("path_entries", None)
+        environment.pop("ld_library_path", None)
     if redact:
         return redact_value(data, home=home)
     return redact_value(data, home="")

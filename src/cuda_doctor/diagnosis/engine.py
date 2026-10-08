@@ -50,7 +50,10 @@ class DiagnosisEngine:
             try:
                 issues.extend(check.run(ctx))
             except Exception as exc:
-                result.check_errors[check.code] = f"{type(exc).__name__}: {exc}"
+                # Keyed by class name: two checks may share an issue code
+                # (e.g. both TORCH005 aspects) and must not overwrite
+                # each other's error reports.
+                result.check_errors[type(check).__name__] = f"{type(exc).__name__}: {exc}"
         issues.sort(key=lambda issue: (_SEVERITY_ORDER[issue.severity], issue.code))
         result.issues = issues
         result.summary = Summary.from_issues(issues)

@@ -27,3 +27,10 @@ class Reporter(ABC):
     @abstractmethod
     def render(self, inputs: ReportInputs) -> str:
         """Return the full report as text."""
+
+
+def format_memory(memory_mb: int | None) -> str:
+    """Render a MiB quantity as human-readable GiB ("" when unknown)."""
+    if not memory_mb:
+        return ""
+    return f"{memory_mb / 1024:.1f} GiB"

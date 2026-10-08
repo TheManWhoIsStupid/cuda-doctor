@@ -31,9 +31,18 @@ class PyTorchCollector:
         info = PyTorchInfo()
         try:
             torch = self._import_module("torch")
-        except ImportError:
-            return info  # not installed: a normal absence, not an error
+        except ModuleNotFoundError as exc:
+            if exc.name == "torch":
+                return info  # genuinely absent: a normal fact, not an error
+            # e.g. "No module named 'torch._C'" — the package is installed
+            # but broken; reporting "not installed" would hide the problem.
+            info.installed = True
+            info.import_error = f"{type(exc).__name__}: {exc}"[:300]
+            return info
         except Exception as exc:
+            # Any other import-time failure (missing native library, DLL
+            # load failure, ...) means a broken install, not an absent one.
+            info.installed = True
             info.import_error = f"{type(exc).__name__}: {exc}"[:300]
             return info
 

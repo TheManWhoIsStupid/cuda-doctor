@@ -9,7 +9,7 @@ from rich.console import Console
 from cuda_doctor.core.enums import EnvironmentStatus, Severity
 from cuda_doctor.core.models import EnvironmentSnapshot
 from cuda_doctor.diagnosis.engine import DiagnosisResult
-from cuda_doctor.reporters.base import Reporter, ReportInputs
+from cuda_doctor.reporters.base import Reporter, ReportInputs, format_memory
 from cuda_doctor.utils.redact import redact_text
 from cuda_doctor.utils.versions import compare_versions, parse_cuda_version
 from cuda_doctor.version import __version__
@@ -107,7 +107,7 @@ class TerminalReporter(Reporter):
         if not snapshot.gpus:
             self._kv(console, "Devices", "none detected", marks["err"])
         for gpu in snapshot.gpus:
-            memory = _format_memory(gpu.memory_total_mb)
+            memory = format_memory(gpu.memory_total_mb)
             compute = f"compute {gpu.compute_capability}" if gpu.compute_capability else ""
             detail = "  ".join(part for part in (memory, compute) if part)
             self._kv(console, f"GPU {gpu.index}", f"{gpu.name}  {detail}".rstrip())
@@ -347,10 +347,3 @@ def _marks(console: Console) -> dict[str, str]:
         "err": "[red]ERR[/red]",
         "info": "[blue]INFO[/blue]",
     }
-
-
-def _format_memory(memory_mb: int | None) -> str:
-    if memory_mb is None:
-        return ""
-    gib = memory_mb / 1024
-    return f"{gib:.1f} GiB"

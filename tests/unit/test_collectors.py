@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import importlib.metadata
+import platform
+import sys
 import types
 
 import pytest
@@ -18,6 +21,7 @@ from cuda_doctor.collectors.nvidia_smi import (
     XML_ARGS,
     NvidiaSmiClient,
 )
+from cuda_doctor.collectors.python_env import PythonEnvCollector
 from cuda_doctor.collectors.pytorch import PyTorchCollector
 from cuda_doctor.collectors.system import SystemCollector
 from cuda_doctor.core.enums import Platform
@@ -189,18 +193,29 @@ def _fake_torch(cuda: str | None, available: bool = True, devices: int = 1):
 class TestPyTorchCollector:
     def test_not_installed(self):
         def raises(name):
-            raise ImportError("No module named 'torch'")
+            # What a genuinely absent torch raises on a real interpreter.
+            raise ModuleNotFoundError("No module named 'torch'", name="torch")
 
         info = PyTorchCollector(raises).collect()
         assert info.installed is False
         assert info.import_error is None
+
+    def test_broken_submodule_is_not_reported_as_absent(self):
+        def raises(name):
+            # torch/ exists but e.g. torch._C is missing/corrupted.
+            raise ModuleNotFoundError("No module named 'torch._C'", name="torch._C")
+
+        info = PyTorchCollector(raises).collect()
+        assert info.installed is True
+        assert info.import_error and "torch._C" in info.import_error
 
     def test_import_failure_captured(self):
         def raises(name):
             raise RuntimeError("libcuda.so.1: cannot open shared object file")
 
         info = PyTorchCollector(raises).collect()
-        assert info.installed is False
+        # The package is present; only the import itself failed.
+        assert info.installed is True
         assert info.import_error and "libcuda" in info.import_error
 
     def test_full_cuda_torch(self):
@@ -293,3 +308,62 @@ class TestEnvironmentCollector:
         assert info.variables == {"CUDA_PATH": r"C:\CUDA\v12.4"}
         assert info.cuda_path_entries == [(0, r"C:\CUDA\v12.4\bin")]
         assert info.ld_library_path is None
+
+    def test_linux_env_names_are_case_sensitive(self):
+        # A lowercase "cuda_home" is a *different* variable on Linux and must
+        # not be conflated with CUDA_HOME (or "path" with PATH).
+        info = EnvironmentCollector(
+            env={"cuda_home": "/opt/cuda-12.4", "path": "/opt/cuda-12.4/bin:/usr/bin"},
+            platform=Platform.LINUX,
+        ).collect()
+        assert info.variables == {}
+        assert info.cuda_path_entries == []
+
+    def test_windows_env_names_fold_case(self):
+        info = EnvironmentCollector(
+            env={"cuda_path": r"C:\CUDA\v12.4", "path": r"C:\CUDA\v12.4\bin;C:\Windows"},
+            platform=Platform.WINDOWS,
+        ).collect()
+        assert info.variables == {"CUDA_PATH": r"C:\CUDA\v12.4"}
+        assert info.cuda_path_entries == [(0, r"C:\CUDA\v12.4\bin")]
+
+
+class TestPythonEnvCollector:
+    def test_system_python_outside_venv(self, monkeypatch):
+        monkeypatch.setattr(sys, "prefix", "/usr")
+        monkeypatch.setattr(sys, "base_prefix", "/usr")
+        info = PythonEnvCollector(env={}).collect()
+        assert info.in_virtual_env is False
+        assert info.virtual_env_path is None
+        assert info.version == platform.python_version()
+        assert info.executable
+
+    def test_venv_detected_via_prefix(self, monkeypatch):
+        monkeypatch.setattr(sys, "prefix", "/opt/venv")
+        monkeypatch.setattr(sys, "base_prefix", "/usr")
+        info = PythonEnvCollector(env={}).collect()
+        assert info.in_virtual_env is True
+        assert info.virtual_env_path == "/opt/venv"
+
+    def test_venv_detected_via_virtual_env_variable(self, monkeypatch):
+        monkeypatch.setattr(sys, "prefix", "/usr")
+        monkeypatch.setattr(sys, "base_prefix", "/usr")
+        info = PythonEnvCollector(env={"VIRTUAL_ENV": "/opt/venv"}).collect()
+        assert info.in_virtual_env is True
+
+    def test_pip_version_reported(self, monkeypatch):
+        monkeypatch.setattr(importlib.metadata, "version", lambda name: "24.0")
+        monkeypatch.setattr(sys, "prefix", "/usr")
+        monkeypatch.setattr(sys, "base_prefix", "/usr")
+        info = PythonEnvCollector(env={}).collect()
+        assert info.pip_version == "24.0"
+
+    def test_pip_version_absent_is_not_an_error(self, monkeypatch):
+        def missing(name):
+            raise importlib.metadata.PackageNotFoundError(name)
+
+        monkeypatch.setattr(importlib.metadata, "version", missing)
+        monkeypatch.setattr(sys, "prefix", "/usr")
+        monkeypatch.setattr(sys, "base_prefix", "/usr")
+        info = PythonEnvCollector(env={}).collect()
+        assert info.pip_version is None

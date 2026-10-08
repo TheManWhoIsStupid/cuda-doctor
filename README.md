@@ -152,7 +152,7 @@ Key invariants (see `AGENTS.md`):
 bash scripts/dev_install.sh      # Linux/macOS   (pip install -e ".[dev]")
 # or: pwsh scripts/dev_install.ps1   # Windows
 
-pytest                           # 253 tests: unit + integration (hermetic)
+pytest                           # 273 tests: unit + integration (hermetic)
 ruff check src tests             # lint
 mypy                             # types (strict-ish: disallow_untyped_defs)
 ```

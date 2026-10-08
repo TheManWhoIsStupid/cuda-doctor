@@ -60,20 +60,26 @@ def _run_diagnose(fmt: ReportFormat, output: Path | None, verbose: bool) -> None
 
     inputs = ReportInputs(snapshot=snapshot, result=result, generated_at=_now())
 
-    if output is not None:
-        if fmt is ReportFormat.TERMINAL:
-            reporter: Reporter = TerminalReporter(verbose=verbose)
+    try:
+        if output is not None:
+            if fmt is ReportFormat.TERMINAL:
+                reporter: Reporter = TerminalReporter(verbose=verbose)
+            else:
+                reporter = _FORMAT_REPORTER[fmt]()
+            Path(output).write_text(reporter.render(inputs), encoding="utf-8")
+            typer.secho(
+                f"Report written to {output} — status: {result.summary.status.value}",
+                fg=typer.colors.GREEN,
+            )
+        elif fmt is ReportFormat.TERMINAL:
+            TerminalReporter(console, verbose=verbose).draw(console, inputs)
         else:
-            reporter = _FORMAT_REPORTER[fmt]()
-        Path(output).write_text(reporter.render(inputs), encoding="utf-8")
-        typer.secho(
-            f"Report written to {output} — status: {result.summary.status.value}",
-            fg=typer.colors.GREEN,
-        )
-    elif fmt is ReportFormat.TERMINAL:
-        TerminalReporter(console, verbose=verbose).draw(console, inputs)
-    else:
-        typer.echo(_FORMAT_REPORTER[fmt]().render(inputs))
+            typer.echo(_FORMAT_REPORTER[fmt]().render(inputs))
+    except Exception as exc:
+        # Rendering bugs and unwritable --output paths must degrade into a
+        # friendly message, never a traceback (safe failure over crashes).
+        typer.secho(f"Internal error while producing the report: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(code=2) from exc
 
 
 @app.callback(invoke_without_command=True)

@@ -27,3 +27,6 @@ htmlcov/
 # Locally generated reports
 /report.md
 /report.json
+
+# Agent-private working documents (local only; never commit)
+.agent-private/

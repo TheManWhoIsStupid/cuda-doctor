@@ -5,6 +5,7 @@ from __future__ import annotations
 import platform
 import sys
 
+from cuda_doctor.core.enums import Platform
 from cuda_doctor.core.models import SystemInfo
 from cuda_doctor.utils.platform import current_platform
 
@@ -14,7 +15,15 @@ class SystemCollector:
 
     Deliberately excludes hostname and username: they are personal data the
     tool does not need.
+
+    ``platform`` (the behavioral classification the diagnosis uses, e.g. for
+    per-platform driver minimums) defaults to the host OS but is injectable so
+    a :class:`~cuda_doctor.core.runner.CollectionRunner` targeting another
+    platform records that platform instead of the host it happens to run on.
     """
+
+    def __init__(self, platform: Platform | None = None) -> None:
+        self._platform = platform or current_platform()
 
     def collect(self) -> SystemInfo:
         return SystemInfo(
@@ -22,7 +31,7 @@ class SystemCollector:
             os_version=self._os_version(),
             kernel_version=platform.release() or "unknown",
             architecture=platform.machine() or "unknown",
-            platform=current_platform(),
+            platform=self._platform,
             python_version=platform.python_version(),
             python_executable=sys.executable or "unknown",
         )

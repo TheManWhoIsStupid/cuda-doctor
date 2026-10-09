@@ -64,6 +64,16 @@ Target: v0.1.1 — correctness pass on CUDA compatibility semantics
   UNKNOWN handling for both driver and compiler rules, and cross-platform
   PATH separators).
 
+### Fixed
+
+- `CollectionRunner(platform=...)` now records the injected platform in
+  `snapshot.system.platform` on any host OS. The system collector previously
+  read the host OS, so a snapshot simulated for one platform but collected on
+  another was diagnosed with the *host's* compatibility minimums (surfaced as
+  the Windows CI failure of the driver-too-old integration scenario). With no
+  override, production behavior is unchanged: the snapshot still reports the
+  actual host platform.
+
 ## [0.1.0] - 2026-10-08
 
 ### Added

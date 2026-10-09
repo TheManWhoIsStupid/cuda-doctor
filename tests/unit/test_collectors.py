@@ -36,6 +36,17 @@ class TestSystemCollector:
         assert info.kernel_version
         assert info.platform in list(Platform)
 
+    def test_platform_injection(self):
+        # The behavioral classification must follow the injected target, not
+        # the host OS (host-descriptive fields like os_name stay host-read).
+        info = SystemCollector(platform=Platform.MACOS).collect()
+        assert info.platform is Platform.MACOS
+
+    def test_platform_defaults_to_host(self):
+        from cuda_doctor.utils.platform import current_platform
+
+        assert SystemCollector().collect().platform is current_platform()
+
     def test_no_personal_data_in_model(self):
         info = SystemCollector().collect()
         # Hostname/username are intentionally not part of the model.

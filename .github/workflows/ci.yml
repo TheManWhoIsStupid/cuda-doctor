@@ -33,6 +33,37 @@ jobs:
             echo "::error::pytest tail:%0A${tail_text//$'\n'/%0A}"
             exit $code
           fi
+      - name: Diagnostics (failing tests -> commit statuses)
+        # TEMPORARY diagnostics: CI logs are not readable from the development
+        # sandbox, but commit statuses are. Removed once the Windows failure
+        # is diagnosed. Does not alter how tests run.
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          grep -E "^(FAILED|ERROR)" pytest.log | head -15
+          {
+            echo "## Failing tests (${{ runner.os }})"
+            grep -E "^(FAILED|ERROR)" pytest.log | head -15
+            echo; echo '```'; tail -c 2000 pytest.log; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          i=0
+          grep -E "^(FAILED|ERROR)" pytest.log | head -15 | while IFS= read -r line; do
+            i=$((i+1))
+            desc=$(printf '%s' "$line" | tr -d '\r' | cut -c1-140)
+            gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" \
+              -f state=failure \
+              -f "context=ci-diag/${{ runner.os }}-$i" \
+              -f "description=$desc" \
+              -f "target_url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          done
+          summary=$(tail -n 3 pytest.log | tr '\n' ' ' | tr -d '\r' | cut -c1-140)
+          gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" \
+            -f state=failure \
+            -f "context=ci-diag/${{ runner.os }}-summary" \
+            -f "description=$summary"
 
   lint:
     name: ruff + mypy

@@ -24,7 +24,7 @@ cuda-doctor                  # run the full diagnosis (terminal report)
 ```
 
 ```text
-CUDA Doctor v0.1.0
+CUDA Doctor v0.1.1
 
 System
   OS              Linux Ubuntu 22.04.5 LTS (kernel 5.15.0-91-generic)

@@ -7,8 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Target: v0.1.1 — correctness pass on CUDA compatibility semantics
-(branch `fix/v0.1.1-correctness`, pending external review; not released).
+## [0.1.1] - 2026-10-09
+
+Correctness pass on CUDA compatibility semantics.
 
 ### Changed
 
@@ -116,5 +117,6 @@ Self-review hardening pass:
 - Internal check errors are keyed by check class, so two checks sharing an
   issue code can no longer overwrite each other's diagnostics.
 
-[Unreleased]: https://github.com/TheManWhoIsStupid/cuda-doctor/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/TheManWhoIsStupid/cuda-doctor/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/TheManWhoIsStupid/cuda-doctor/releases/tag/v0.1.1
 [0.1.0]: https://github.com/TheManWhoIsStupid/cuda-doctor/releases/tag/v0.1.0

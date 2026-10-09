@@ -1,0 +1,44 @@
+name: Package
+
+# Distribution smoke: build the artifacts and prove they install and run.
+# Complements (does not duplicate) the unit-test matrix in ci.yml.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: install (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install packaging tools
+        run: python -m pip install build twine
+      - name: Build wheel and sdist
+        run: python -m build
+      - name: Validate artifacts
+        shell: bash
+        run: python -m twine check dist/*
+      - name: Install the built wheel
+        shell: bash
+        run: python -m pip install dist/*.whl
+      - name: Smoke test the installed package
+        shell: bash
+        working-directory: ${{ runner.temp }}   # outside the checkout
+        run: |
+          cuda-doctor --version
+          python -m cuda_doctor --version
+          cuda-doctor info
+          cuda-doctor --help > /dev/null

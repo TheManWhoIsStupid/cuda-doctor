@@ -16,15 +16,40 @@ and a completed run always exits `0` (only internal tool failures exit non-zero)
 
 ## Quick start
 
-```bash
-# Python 3.10+
-pip install -e ".[dev]"     # or: pip install .        (from a checkout)
+Install from PyPI (Python 3.10+):
 
-cuda-doctor                  # run the full diagnosis (terminal report)
+```bash
+# Linux / macOS
+python -m pip install cuda-doctor
+
+# Windows
+py -m pip install cuda-doctor
 ```
 
+Then run it:
+
+```bash
+cuda-doctor                  # full diagnosis, terminal report
+```
+
+> **Install it where your PyTorch lives.** cuda-doctor imports PyTorch
+> in-process from the Python environment it runs in. To diagnose the PyTorch
+> in one of your conda/venv environments, install and run it *inside* that
+> environment:
+>
+> ```bash
+> conda activate my-torch-env
+> python -m pip install cuda-doctor
+> cuda-doctor
+> ```
+>
+> For the same reason, prefer `pip install` over [pipx](https://pipx.pypa.io):
+> a pipx install runs in its own isolated environment and cannot see the
+> PyTorch installed in your conda/venv environment — it would report
+> "torch not installed" even when it is.
+
 ```text
-CUDA Doctor v0.1.1
+CUDA Doctor v0.1.2
 
 System
   OS              Linux Ubuntu 22.04.5 LTS (kernel 5.15.0-91-generic)
@@ -175,7 +200,7 @@ Key invariants (see `AGENTS.md`):
 bash scripts/dev_install.sh      # Linux/macOS   (pip install -e ".[dev]")
 # or: pwsh scripts/dev_install.ps1   (Windows)
 
-pytest                           # 291 tests: unit + integration (hermetic)
+pytest                           # 310 tests: unit + integration (hermetic)
 ruff check src tests             # lint
 mypy                             # types (strict-ish: disallow_untyped_defs)
 ```

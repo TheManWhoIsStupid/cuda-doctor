@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-09
+
+Distribution release: PyPI-ready packaging and reproducible publication
+support. No diagnostic behavior changes.
+
+### Changed
+
+- Packaging metadata modernized to PEP 639: SPDX license expression
+  (`license = "MIT"`), explicit `license-files`, and the deprecated license
+  Trove classifier removed (build-system requirement raised to
+  `setuptools>=77.0.3` accordingly). The project license itself is unchanged.
+- README Quick Start is now PyPI-first (`python -m pip install cuda-doctor`
+  on Linux/macOS, `py -m pip install cuda-doctor` on Windows) and explains
+  that cuda-doctor should be installed into the environment whose PyTorch
+  the user wants to diagnose — including a concise note on why pipx's
+  isolation makes it a poor fit for this tool. Source/development installs
+  moved to the Development section.
+
+### Added
+
+- Package CI (`.github/workflows/package.yml`): a distribution smoke matrix
+  (Ubuntu/Windows × Python 3.10/3.13) that builds the wheel and sdist,
+  validates them with `twine check`, installs the built wheel into a clean
+  environment, and runs `cuda-doctor --version` / `python -m cuda_doctor
+  --version` / `cuda-doctor info` from outside the checkout.
+- PyPI publishing workflow (`.github/workflows/publish.yml`) using PyPI
+  Trusted Publishing (`pypa/gh-action-pypi-publish`): token-free, triggered
+  only by an actual GitHub Release publication, gated by the protected
+  `pypi` environment, with the built wheel and sdist also attached to the
+  GitHub Release by a separately permissioned job. This prepares PyPI
+  distribution; the first actual upload will occur when the release
+  workflow runs.
+
 ## [0.1.1] - 2026-10-09
 
 Correctness pass on CUDA compatibility semantics.
@@ -117,6 +150,7 @@ Self-review hardening pass:
 - Internal check errors are keyed by check class, so two checks sharing an
   issue code can no longer overwrite each other's diagnostics.
 
-[Unreleased]: https://github.com/TheManWhoIsStupid/cuda-doctor/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/TheManWhoIsStupid/cuda-doctor/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/TheManWhoIsStupid/cuda-doctor/releases/tag/v0.1.2
 [0.1.1]: https://github.com/TheManWhoIsStupid/cuda-doctor/releases/tag/v0.1.1
 [0.1.0]: https://github.com/TheManWhoIsStupid/cuda-doctor/releases/tag/v0.1.0

@@ -11,7 +11,7 @@ from cuda_doctor.core.models import EnvironmentSnapshot
 from cuda_doctor.diagnosis.engine import DiagnosisResult
 from cuda_doctor.reporters.base import Reporter, ReportInputs, format_memory
 from cuda_doctor.utils.redact import redact_text
-from cuda_doctor.utils.versions import compare_versions, parse_cuda_version
+from cuda_doctor.utils.versions import CudaVersion, parse_cuda_version
 from cuda_doctor.version import __version__
 
 _STATUS_STYLE = {
@@ -90,6 +90,22 @@ class TerminalReporter(Reporter):
         prefix = f"{mark} " if mark else ""
         console.print(f"  {prefix}[dim]{label:<15}[/dim] {text}")
 
+    @staticmethod
+    def _version_relation_mark(
+        runtime: CudaVersion, driver_max: CudaVersion, marks: dict[str, str]
+    ) -> str:
+        """Mark for a runtime-vs-driver-UMD version comparison.
+
+        A generation gap (runtime from a newer CUDA major than the driver's)
+        gets the error mark; a same-family minor gap is informational only
+        (CUDA minor-version compatibility); everything else is OK.
+        """
+        if driver_max.major < runtime.major:
+            return marks["err"]
+        if runtime.major == driver_max.major and runtime > driver_max:
+            return marks["info"]
+        return marks["ok"]
+
     def _system(self, console: Console, snapshot: EnvironmentSnapshot) -> None:
         self._section(console, "System")
         system = snapshot.system
@@ -121,7 +137,7 @@ class TerminalReporter(Reporter):
         else:
             self._kv(console, "Version", redact_text(driver.version))
         if driver and driver.cuda_version:
-            self._kv(console, "Max CUDA", driver.cuda_version)
+            self._kv(console, "Reported CUDA", driver.cuda_version)
         console.print()
 
     def _cuda(self, console: Console, snapshot: EnvironmentSnapshot) -> None:
@@ -226,25 +242,24 @@ class TerminalReporter(Reporter):
         torch_cuda = parse_cuda_version(snapshot.pytorch.cuda_version)
 
         if driver_max is None:
-            self._kv(console, "Driver max CUDA", "unknown")
+            self._kv(console, "Driver CUDA", "unknown")
         if toolkit is not None and driver_max is not None:
-            ok = compare_versions(toolkit, driver_max) <= 0
-            relation = "≤" if ok else ">"
-            mark = marks["ok"] if ok else marks["err"]
             self._kv(
                 console,
                 "Toolkit vs driver",
-                f"toolkit {toolkit} {relation} driver max {driver_max}",
-                mark,
+                f"toolkit {toolkit} vs driver CUDA {driver_max}",
+                self._version_relation_mark(toolkit, driver_max, marks),
             )
         if torch_cuda is not None and driver_max is not None:
-            ok = compare_versions(torch_cuda, driver_max) <= 0
-            relation = "≤" if ok else ">"
-            mark = marks["ok"] if ok else marks["err"]
+            # Observed runtime success outranks the static comparison.
+            if snapshot.pytorch.cuda_available is True:
+                mark = marks["ok"]
+            else:
+                mark = self._version_relation_mark(torch_cuda, driver_max, marks)
             self._kv(
                 console,
                 "torch vs driver",
-                f"torch runtime {torch_cuda} {relation} driver max {driver_max}",
+                f"torch runtime {torch_cuda} vs driver CUDA {driver_max}",
                 mark,
             )
         if torch_cuda is not None and toolkit is not None and torch_cuda != toolkit:

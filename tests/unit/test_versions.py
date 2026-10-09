@@ -70,6 +70,14 @@ class TestCompareVersions:
     def test_minor_ordering(self):
         assert compare_versions((12, 9), (12, 10)) == -1
 
+    def test_one_component_branch_minimum(self):
+        # Branch-level family minimums such as (580,) must compare correctly
+        # against full driver versions via zero padding.
+        assert compare_versions((580, 65, 6), (580,)) == 1
+        assert compare_versions((590, 44, 1), (580,)) == 1
+        assert compare_versions((575, 57, 8), (580,)) == -1
+        assert compare_versions((580,), (580, 0, 0)) == 0
+
 
 class TestCudaVersionFromPath:
     def test_linux_versioned(self):

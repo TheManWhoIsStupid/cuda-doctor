@@ -60,6 +60,9 @@ cuda_doctor = ["py.typed", "data/*.json"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# Tests import each other as `tests.*` (namespace package); bare `pytest`
+# does not put the repo root on sys.path the way `python -m pytest` does.
+pythonpath = ["."]
 
 [tool.coverage.run]
 source = ["cuda_doctor"]

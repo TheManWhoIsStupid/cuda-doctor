@@ -205,8 +205,7 @@ class TestSummary:
 
 
 class TestIssueToDict:
-    def test_redacts_home_paths(self, monkeypatch):
-        monkeypatch.setenv("HOME", "/home/secretuser")
+    def test_redacts_home_paths(self, fake_home):
         issue = Issue(
             code="T",
             severity=Severity.INFO,

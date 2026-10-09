@@ -30,10 +30,15 @@ def inputs_for(snapshot) -> ReportInputs:
 
 
 def broken_inputs() -> ReportInputs:
-    """A snapshot with several real issues (import failure + CPU build path)."""
+    """A snapshot with several real issues (driver a generation too old)."""
     snapshot = base_snapshot()
-    snapshot.driver = replace(snapshot.driver, version="535.104.05", cuda_version="12.2")
+    # CUDA 11-generation driver with a CUDA 12.6 toolkit and a CUDA-12 torch
+    # build whose availability probe failed (cuda_available None): DRV002 +
+    # TORCH006 (the static verdict — TORCH002 stays silent because CUDA was
+    # not *observed* unavailable).
+    snapshot.driver = replace(snapshot.driver, version="470.42.01", cuda_version="11.4")
     snapshot.cuda = replace(snapshot.cuda, toolkit_version="12.6")
+    snapshot.pytorch = replace(snapshot.pytorch, cuda_available=None, devices=[])
     return inputs_for(snapshot)
 
 
@@ -76,10 +81,18 @@ class TestTerminalReporter:
 
     def test_issues_rendered_with_codes_and_recommendations(self):
         text = TerminalReporter().render(broken_inputs())
-        assert "TORCH006" in text  # torch cu124 > driver max 12.2
-        assert "DRV002" in text  # toolkit 12.6 > driver max 12.2
+        assert "TORCH006" in text  # torch cu124 vs CUDA 11-generation driver
+        assert "DRV002" in text  # toolkit 12.6 vs CUDA 11-generation driver
         assert "→" in text  # recommendation marker
         assert "DEGRADED" in text
+
+    def test_driver_cuda_labeled_reported_not_max(self):
+        # The nvidia-smi CUDA version must not be presented as a maximum:
+        # minor-version compatibility makes "Max CUDA" misleading.
+        text = TerminalReporter().render(inputs_for(base_snapshot()))
+        assert "Reported CUDA" in text
+        assert "Max CUDA" not in text
+        assert "max CUDA" not in text
 
     def test_gpu_listing(self):
         text = TerminalReporter().render(inputs_for(base_snapshot()))
@@ -92,6 +105,38 @@ class TestTerminalReporter:
         assert "2.6.0+cu124" in text
         assert "available, 1 device(s)" in text
 
+    def test_same_family_minor_gap_marked_info_not_error(self):
+        # Minor-version compatibility: toolkit 12.6 on a driver reporting
+        # CUDA 12.2 must carry the info mark, not the error mark.
+        snapshot = base_snapshot()
+        snapshot.driver = replace(snapshot.driver, version="535.216.01", cuda_version="12.2")
+        snapshot.cuda = replace(snapshot.cuda, toolkit_version="12.6")
+        text = TerminalReporter().render(inputs_for(snapshot))
+        line = next(ln for ln in text.splitlines() if "toolkit 12.6 vs driver" in ln)
+        assert "✗" not in line
+        assert line.strip().startswith(("i ", "INFO "))
+
+    def test_generation_gap_marked_error(self):
+        snapshot = base_snapshot()
+        snapshot.driver = replace(snapshot.driver, version="470.42.01", cuda_version="11.4")
+        snapshot.cuda = replace(snapshot.cuda, toolkit_version="12.6")
+        text = TerminalReporter().render(inputs_for(snapshot))
+        line = next(ln for ln in text.splitlines() if "toolkit 12.6 vs driver" in ln)
+        assert "✗" in line
+
+    def test_torch_row_green_when_cuda_observed_working(self):
+        # Observed runtime success outranks the static comparison: even a
+        # generation gap in the numbers must not show the error mark.
+        snapshot = base_snapshot()
+        snapshot.driver = replace(snapshot.driver, version="470.42.01", cuda_version="11.4")
+        snapshot.pytorch = replace(snapshot.pytorch, cuda_version="12.6")
+        text = TerminalReporter().render(inputs_for(snapshot))
+        line = next(
+            ln for ln in text.splitlines() if "torch runtime 12.6 vs driver" in ln
+        )
+        assert "✗" not in line
+        assert ("✓" in line) or ("OK" in line)
+
     def test_ascii_fallback_when_not_utf8(self):
         class Cp1252File(io.StringIO):
             encoding = "cp1252"  # consoles derive encoding from their file
@@ -103,8 +148,7 @@ class TestTerminalReporter:
         assert "ERR" in text
         assert "✗" not in text
 
-    def test_home_paths_redacted(self, monkeypatch):
-        monkeypatch.setenv("HOME", "/home/secretuser")
+    def test_home_paths_redacted(self, fake_home):
         snapshot = base_snapshot()
         snapshot.system = replace(
             snapshot.system, python_executable="/home/secretuser/venv/bin/python"
@@ -148,8 +192,7 @@ class TestJsonReporter:
         assert payload["summary"]["status"] == "DEGRADED"
         assert payload["summary"]["errors"] >= 2
 
-    def test_snapshot_redacted(self, monkeypatch):
-        monkeypatch.setenv("HOME", "/home/secretuser")
+    def test_snapshot_redacted(self, fake_home):
         snapshot = base_snapshot()
         snapshot.system = replace(
             snapshot.system, python_executable="/home/secretuser/venv/bin/python"
@@ -179,8 +222,7 @@ class TestJsonReporter:
         # The CUDA-relevant subsets remain.
         assert "cuda_path_entries" in env
 
-    def test_check_errors_are_redacted(self, monkeypatch):
-        monkeypatch.setenv("HOME", "/home/secretuser")
+    def test_check_errors_are_redacted(self, fake_home):
         inputs = inputs_for(base_snapshot())
         inputs.result.check_errors["ExplodingCheck"] = (
             "RuntimeError: boom at /home/secretuser/venv/lib/libtorch.so"
@@ -206,8 +248,12 @@ class TestMarkdownReporter:
         assert "**Evidence**" in text
         assert "DEGRADED" in text
 
-    def test_redacted(self, monkeypatch):
-        monkeypatch.setenv("HOME", "/home/secretuser")
+    def test_driver_line_reports_cuda_version_neutrally(self):
+        text = MarkdownReporter().render(inputs_for(base_snapshot()))
+        assert "reported CUDA 13.0" in text
+        assert "max CUDA" not in text
+
+    def test_redacted(self, fake_home):
         snapshot = base_snapshot()
         snapshot.system = replace(
             snapshot.system, python_executable="/home/secretuser/venv/bin/python"

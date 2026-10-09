@@ -55,7 +55,9 @@ class CollectionRunner:
     def collect(self) -> EnvironmentSnapshot:
         errors: dict[str, str] = {}
 
-        system = self._guarded(errors, "system", lambda: SystemCollector().collect())
+        system = self._guarded(
+            errors, "system", lambda: SystemCollector(self.platform).collect()
+        )
         gpu = self._guarded(errors, "gpu", lambda: GPUCollector(self.runner).collect())
         cuda = self._guarded(
             errors,

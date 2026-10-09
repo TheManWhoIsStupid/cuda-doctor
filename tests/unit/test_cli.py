@@ -31,7 +31,7 @@ class TestVersionAndHelp:
     def test_version_flag(self):
         result = runner.invoke(app, ["--version"])
         assert result.exit_code == 0
-        assert "cuda-doctor 0.1.0" in result.output
+        assert "cuda-doctor 0.1.1" in result.output
 
     def test_help_lists_commands(self):
         result = runner.invoke(app, ["--help"])
@@ -123,7 +123,7 @@ class TestInfo:
     def test_info_output(self):
         result = runner.invoke(app, ["info"])
         assert result.exit_code == 0
-        assert "cuda-doctor 0.1.0" in result.output
+        assert "cuda-doctor 0.1.1" in result.output
         assert "Diagnostic checks: 24" in result.output
         assert "Read-only" in result.output
 
@@ -138,7 +138,7 @@ class TestModuleInvocation:
             timeout=60,
         )
         assert proc.returncode == 0
-        assert "cuda-doctor 0.1.0" in proc.stdout
+        assert "cuda-doctor 0.1.1" in proc.stdout
 
     def test_main_module_exports_main(self):
         assert callable(__main__.main)

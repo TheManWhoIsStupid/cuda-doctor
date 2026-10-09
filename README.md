@@ -1,5 +1,7 @@
 # cuda-doctor
 
+[![CI](https://github.com/TheManWhoIsStupid/cuda-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/TheManWhoIsStupid/cuda-doctor/actions/workflows/ci.yml)
+
 > Read-only local diagnostics for CUDA / PyTorch development environments.
 >
 > Detect → Analyze → Explain → Recommend. Never modifies your system.
@@ -22,14 +24,14 @@ cuda-doctor                  # run the full diagnosis (terminal report)
 ```
 
 ```text
-CUDA Doctor v0.1.0
+CUDA Doctor v0.1.1
 
 System
   OS              Linux Ubuntu 22.04.5 LTS (kernel 5.15.0-91-generic)
   ...
 NVIDIA Driver
   Version         580.126.09
-  Max CUDA        13.0
+  Reported CUDA   13.0
 ...
 Summary
   Status: HEALTHY  (2 info)
@@ -58,9 +60,9 @@ a CI gate.
 | Area | Codes | Highlights |
 | --- | --- | --- |
 | GPU | `GPU001`–`GPU003` | nvidia-smi missing, no GPUs, smi execution failure |
-| Driver | `DRV001`–`DRV002` | unknown driver version; toolkit newer than the driver supports |
+| Driver | `DRV001`–`DRV002` | unknown driver version; driver below the documented minimum for the toolkit's CUDA generation |
 | CUDA | `CUDA001`–`CUDA006` | no nvcc; CUDA_HOME unset/invalid; multiple toolkits; multiple CUDA bins in PATH; nvcc ≠ CUDA_HOME |
-| PyTorch | `TORCH001`–`TORCH006` | not installed; import failures (with known-signature advice); `is_available()` False; CPU-only wheel; runtime vs toolkit; runtime newer than driver |
+| PyTorch | `TORCH001`–`TORCH006` | not installed; import failures (with known-signature advice); `is_available()` False; CPU-only wheel; runtime vs toolkit; runtime from a newer CUDA generation than the driver |
 | Compiler | `CMP001`–`CMP002` | no host compiler; gcc/Visual Studio outside the toolkit's supported range |
 | Environment | `ENV001`–`ENV004` | stale CUDA paths; duplicates; conflicting `LD_LIBRARY_PATH`; older CUDA shadowing newer in PATH |
 
@@ -68,19 +70,34 @@ Every finding carries a stable issue code, evidence, and concrete
 recommendations. Example reports: [`examples/sample_report.md`](examples/sample_report.md)
 · [`examples/sample_report.json`](examples/sample_report.json).
 
-### The nuance that matters: local toolkit ≠ torch runtime
+### The nuance that matters: three different "CUDA versions"
 
-The single most common false alarm in CUDA debugging tools is:
+A machine reports three unrelated CUDA versions, and most false alarms in CUDA
+debugging tools come from comparing the wrong pair:
 
-> "Your PyTorch CUDA version (12.4) doesn't match your installed CUDA Toolkit
-> (12.6) — fix this!"
+1. **The local toolkit** (`nvcc --version`) — what you *compile* with.
+2. **PyTorch's bundled runtime** (`torch.version.cuda`) — the CUDA libraries
+   shipped inside the wheel; official wheels bundle their own runtime, so it
+   does not have to match the local toolkit (`TORCH004` stays INFO).
+3. **The driver's CUDA UMD version** (the `CUDA Version:` line in
+   `nvidia-smi`) — the toolkit generation the driver was *validated with*.
+   It is **not a hard ceiling**.
 
-That is almost never a problem. Official PyTorch wheels **bundle their own CUDA
-runtime**; the local toolkit is only used when *compiling* CUDA code (custom
-kernels, extensions). cuda-doctor therefore reports this situation as
-**INFO** (`TORCH004`) with an explanation, not an error. What *is* an error is a
-PyTorch runtime **newer than what the driver supports** (`TORCH006`) — that
-combination genuinely cannot work.
+That third point is the one most tools get wrong. Since CUDA 11, NVIDIA
+supports **CUDA minor-version compatibility**: within a CUDA major family
+(e.g. any CUDA 12.x), applications built with a newer minor release run on
+older drivers of the same generation, as long as the driver meets the
+documented family minimum (Linux 525.60.13 / Windows 528.33 for CUDA 12.x;
+for CUDA 13.x the documented rule is the R580 driver branch, i.e. >= 580).
+So "toolkit 12.6, nvidia-smi says 12.2" is at most an informational note
+(`DRV002` INFO), not an error — with the caveats that newer
+driver-dependent features and newer PTX may still need a driver update.
+
+What *is* a genuine error is a **generation gap** — a CUDA 13 toolkit or
+PyTorch runtime on a CUDA 12-generation driver (`DRV002`/`TORCH006`) — and
+even then only when CUDA is not observed working: if
+`torch.cuda.is_available()` is `True`, observed runtime success always
+overrides the static version comparison.
 
 ## Platforms
 
@@ -138,9 +155,15 @@ Key invariants (see `AGENTS.md`):
 ## Limitations (v0.1)
 
 - Single-user, single-machine scope; no container/WSL-specific detection.
-- Compiler and driver compatibility tables are coarse (major-version level) and
-  worded as *potential* issues; the definitive source is always the CUDA
-  Installation Guide for your toolkit version.
+- Compatibility decisions are deliberately **conservative**: driver minimums
+  follow NVIDIA's documented CUDA minor-version-compatibility baselines per
+  major family, and anything the bundled knowledge does not cover — a future
+  CUDA major (e.g. CUDA 14 before the data ships), an unlisted toolkit minor
+  for compiler rules, or an unreported driver version — is reported as
+  **unknown**, never guessed from older versions.
+- Compiler compatibility tables are coarse and worded as *potential* issues;
+  the definitive source is always the CUDA Installation Guide for your
+  toolkit version.
 - No conda-environment awareness beyond what `PATH`/env vars imply.
 - nvidia-smi is the only GPU source; `NVML`/`lspci` fallbacks are future work.
 - Chinese localization is planned (the maintainers are bilingual); v0.1 output
@@ -150,12 +173,15 @@ Key invariants (see `AGENTS.md`):
 
 ```bash
 bash scripts/dev_install.sh      # Linux/macOS   (pip install -e ".[dev]")
-# or: pwsh scripts/dev_install.ps1   # Windows
+# or: pwsh scripts/dev_install.ps1   (Windows)
 
-pytest                           # 273 tests: unit + integration (hermetic)
+pytest                           # 291 tests: unit + integration (hermetic)
 ruff check src tests             # lint
 mypy                             # types (strict-ish: disallow_untyped_defs)
 ```
+
+CI runs the same commands on Ubuntu and Windows across Python 3.10–3.13
+(`.github/workflows/ci.yml`) — no GPU, driver, CUDA, or PyTorch required.
 
 The test suite needs **no GPU and no CUDA**: collectors run against an injected
 fake command runner, and real parser fixtures captured from actual H20 /

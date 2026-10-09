@@ -60,8 +60,9 @@ class GPUInfo:
 class DriverInfo:
     """NVIDIA driver facts.
 
-    ``cuda_version`` is the maximum CUDA runtime the driver supports, as
-    reported by nvidia-smi (not the installed toolkit version).
+    ``cuda_version`` is the CUDA version reported by nvidia-smi — the CUDA
+    UMD generation the driver was validated with, not a hard limit on the
+    CUDA applications it can run (see CUDA minor-version compatibility).
     """
 
     version: str | None = None

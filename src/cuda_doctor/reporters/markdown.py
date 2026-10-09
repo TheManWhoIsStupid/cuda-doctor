@@ -73,8 +73,10 @@ class MarkdownReporter(Reporter):
 
         driver = snapshot.driver
         if driver and driver.version:
-            max_cuda = f" (max CUDA {driver.cuda_version})" if driver.cuda_version else ""
-            add(f"- **NVIDIA driver**: {driver.version}{max_cuda}")
+            reported = (
+                f" (reported CUDA {driver.cuda_version})" if driver.cuda_version else ""
+            )
+            add(f"- **NVIDIA driver**: {driver.version}{reported}")
 
         cuda = snapshot.cuda
         if cuda.nvcc_found and cuda.nvcc_path:

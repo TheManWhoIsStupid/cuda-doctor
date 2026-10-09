@@ -15,6 +15,22 @@ def fixtures_dir() -> Path:
     return Path(__file__).parent / "fixtures"
 
 
+@pytest.fixture()
+def fake_home(monkeypatch):
+    """Pin home-directory detection at /home/secretuser on any host.
+
+    Redaction goes through ``redact.default_home``; on Windows that reads
+    USERPROFILE (not HOME), so plain ``setenv("HOME", ...)`` would leave
+    the fake home unredacted and the assertions host-dependent.
+    """
+    monkeypatch.setattr(
+        "cuda_doctor.utils.redact.default_home", lambda: "/home/secretuser"
+    )
+    monkeypatch.setenv("HOME", "/home/secretuser")
+    monkeypatch.setenv("USERPROFILE", "/home/secretuser")
+    return "/home/secretuser"
+
+
 def load_fixture(fixtures_dir: Path, relative: str) -> str:
     return (fixtures_dir / relative).read_text(encoding="utf-8")
 

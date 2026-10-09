@@ -9,7 +9,7 @@ from tests.conftest import FakeRunner, load_fixture, ok
 from typer.testing import CliRunner
 
 from cuda_doctor.cli import app
-from cuda_doctor.core.enums import EnvironmentStatus
+from cuda_doctor.core.enums import EnvironmentStatus, Platform
 from cuda_doctor.core.runner import CollectionRunner
 from cuda_doctor.diagnosis.engine import DiagnosisEngine
 from cuda_doctor.reporters import JsonReporter, MarkdownReporter, ReportInputs
@@ -94,6 +94,33 @@ class FakeCpuTorch:
                 return None
 
 
+class FakeUnavailableTorch:
+    # CUDA-enabled build, but torch.cuda.is_available() reports False.
+    __version__ = "2.6.0+cu124"
+
+    class version:
+        cuda = "12.4"
+
+    class cuda:
+        @staticmethod
+        def is_available():
+            return False
+
+
+class FakeProbeFailTorch:
+    # CUDA-enabled build whose is_available() probe itself fails: the
+    # collector records cuda_available=None (probe result unknown).
+    __version__ = "2.6.0+cu124"
+
+    class version:
+        cuda = "12.4"
+
+    class cuda:
+        @staticmethod
+        def is_available():
+            raise RuntimeError("CUDA error: unknown error")
+
+
 def fake_torch_import(torch_module):
     def _import(name):
         if name != "torch":
@@ -147,8 +174,14 @@ def healthy_runner(fixtures, nvcc: str = NVCC) -> FakeRunner:
 
 
 @pytest.fixture()
-def healthy_environment(tmp_path):
+def healthy_environment(tmp_path, monkeypatch):
     """A coherent on-disk world: CUDA_HOME exists and holds bin/nvcc."""
+    # The simulated machine is Linux, so PATH is ":"-joined. On a Windows
+    # host that split also cuts the drive colon out of tmp_path-based
+    # entries ("\Users\..."), which then resolve against the *current*
+    # drive. chdir onto the tmp drive so those fragments exist either way;
+    # on POSIX hosts absolute paths make the chdir a no-op for the tests.
+    monkeypatch.chdir(tmp_path)
     toolkit = tmp_path / "toolkits" / "cuda-12.4"
     (toolkit / "bin").mkdir(parents=True)
     (toolkit / "bin" / "nvcc").write_text("#!/bin/sh\n", encoding="utf-8")
@@ -175,6 +208,7 @@ class TestHealthyMachine:
         paths, runner = healthy_setup(fixtures, toolkit)
         patch_executables(paths)
         snapshot = CollectionRunner(
+            platform=Platform.LINUX,
             command_runner=runner,
             env=env,
             roots=roots,
@@ -197,6 +231,7 @@ class TestHealthyMachine:
         paths, runner = healthy_setup(fixtures, toolkit)
         patch_executables(paths)
         snapshot = CollectionRunner(
+            platform=Platform.LINUX,
             command_runner=runner,
             env=env,
             roots=roots,
@@ -217,6 +252,7 @@ class TestBrokenMachine:
     def test_missing_everything(self, patch_executables, tmp_path):
         patch_executables({})  # nothing on PATH at all
         snapshot = CollectionRunner(
+            platform=Platform.LINUX,
             command_runner=FakeRunner(),
             env={"PATH": "/nonexistent", "CUDA_HOME": str(tmp_path / "gone" / "cuda")},
             roots=(str(tmp_path),),
@@ -235,6 +271,7 @@ class TestBrokenMachine:
     def test_import_failure_matches_known_issue(self, patch_executables, tmp_path):
         patch_executables({})
         snapshot = CollectionRunner(
+            platform=Platform.LINUX,
             command_runner=FakeRunner(),
             env={"PATH": "/nonexistent"},
             roots=(str(tmp_path),),
@@ -252,6 +289,7 @@ class TestBrokenMachine:
 
         def fake_collect():
             return CollectionRunner(
+                platform=Platform.LINUX,
                 command_runner=FakeRunner(),
                 env={"PATH": "/nonexistent", "CUDA_HOME": str(tmp_path / "gone" / "cuda")},
                 roots=(str(tmp_path),),
@@ -274,6 +312,7 @@ class TestCpuOnlyMachine:
         paths, runner = healthy_setup(fixtures, toolkit)
         patch_executables(paths)
         snapshot = CollectionRunner(
+            platform=Platform.LINUX,
             command_runner=runner,
             env=env,
             roots=roots,
@@ -283,6 +322,74 @@ class TestCpuOnlyMachine:
         codes = [issue.code for issue in result.issues]
         assert "TORCH003" in codes  # CPU-only build
         assert result.summary.status is EnvironmentStatus.USABLE_WITH_WARNINGS
+
+
+class TestDriverTooOldMachine:
+    """De-duplication regression (full pipeline): a driver-too-old machine
+    with CUDA observed unavailable gets ONE torch diagnosis — TORCH002, with
+    the driver problem as evidence — never redundant TORCH002 + TORCH006."""
+
+    def _collect(self, patch_executables, fixtures, healthy_environment, torch_module):
+        env, roots, toolkit = healthy_environment
+        paths, _ = healthy_setup(fixtures, toolkit)
+        patch_executables(paths)
+        # An R515 driver (CUDA 11.8 UMD): below the documented CUDA 12.x
+        # family minimum, and a generation older than the 12.x stack.
+        xml = fixtures.xml.replace("580.126.09", "515.43.04").replace("13.0", "11.8")
+        runner = FakeRunner(
+            {
+                (SMI, *CSV_ARGS): ok(fixtures.csv),
+                (SMI, *XML_ARGS): ok(xml),
+                (str(toolkit / "bin" / "nvcc"), "--version"): ok(fixtures.nvcc),
+                (GCC, "--version"): ok("gcc (Ubuntu 11.4.0) 11.4.0\n"),
+                (GXX, "--version"): ok("g++ (Ubuntu 11.4.0) 11.4.0\n"),
+                (CMAKE, "--version"): ok("cmake version 3.28.3\n"),
+                (NINJA, "--version"): ok("1.11.1\n"),
+            }
+        )
+        return CollectionRunner(
+            platform=Platform.LINUX,
+            command_runner=runner,
+            env=env,
+            roots=roots,
+            torch_import=fake_torch_import(torch_module),
+        ).collect()
+
+    def test_torch002_present_torch006_absent(
+        self, patch_executables, fixtures, healthy_environment
+    ):
+        snapshot = self._collect(
+            patch_executables, fixtures, healthy_environment, FakeUnavailableTorch
+        )
+        assert snapshot.driver is not None and snapshot.driver.version == "515.43.04"
+        assert snapshot.pytorch.cuda_available is False
+
+        result = DiagnosisEngine().run(snapshot)
+        codes = [issue.code for issue in result.issues]
+        assert "TORCH002" in codes
+        assert "TORCH006" not in codes  # same root cause, no duplicate ERROR
+        torch_issues = [i for i in result.issues if i.code.startswith("TORCH")]
+        assert [i.code for i in torch_issues] == ["TORCH002"]
+        evidence = " | ".join(torch_issues[0].evidence)
+        assert "525.60.13" in evidence  # documented family minimum
+        assert "CUDA 11.x generation" in evidence  # generation gap
+        assert "DRV002" in codes  # cross-generation toolkit detection preserved
+        assert result.summary.status is EnvironmentStatus.DEGRADED
+
+    def test_unknown_probe_lets_torch006_provide_static_verdict(
+        self, patch_executables, fixtures, healthy_environment
+    ):
+        snapshot = self._collect(
+            patch_executables, fixtures, healthy_environment, FakeProbeFailTorch
+        )
+        assert snapshot.pytorch.cuda_available is None
+
+        result = DiagnosisEngine().run(snapshot)
+        codes = [issue.code for issue in result.issues]
+        assert "TORCH002" not in codes  # CUDA was not *observed* unavailable
+        assert "TORCH006" in codes
+        torch006 = next(i for i in result.issues if i.code == "TORCH006")
+        assert "could not be determined" in torch006.description
 
 
 class TestMultiToolkitMachine:
@@ -298,6 +405,7 @@ class TestMultiToolkitMachine:
             "CUDA_HOME": str(tmp_path / "cuda-11.8"),
         }
         snapshot = CollectionRunner(
+            platform=Platform.LINUX,
             command_runner=healthy_runner(fixtures, nvcc),
             env=env,
             roots=(str(tmp_path),),

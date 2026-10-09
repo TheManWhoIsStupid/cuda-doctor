@@ -1,5 +1,5 @@
 {
-  "comment": "Minimum NVIDIA driver for CUDA minor-version compatibility, per CUDA major family and platform. Source: NVIDIA 'CUDA Compatibility' documentation (Minor Version Compatibility). NOTE: these are NOT the drivers bundled with each toolkit release (see the CUDA Toolkit Release Notes for that table) - they are the documented minimum driver below which an application built with any toolkit of that CUDA major family is not expected to run without a CUDA forward-compatibility package (datacenter GPUs only). Within a family, newer-minor toolkits run on these drivers subject to caveats: features requiring a newer driver and newer PTX may still fail. Values: 11.x per NVIDIA docs (Linux 450.80.02 / Windows 452.39, the R450 minor-compat baseline); 12.x per NVIDIA docs (Linux 525.60.13 / Windows 528.33, the R525/R528 baseline); 13.x: Linux 580.65.06 (R580 baseline, documented); Windows uses 580.88 - the driver shipped with CUDA 13.0 - because NVIDIA does not publish a separate Windows minor-compat minimum for CUDA 13.x. A CUDA major family absent from this table is UNKNOWN by design: no inference from older families.",
+  "comment": "Minimum NVIDIA driver for CUDA minor-version compatibility, per CUDA major family and platform. Source: NVIDIA 'CUDA Compatibility' documentation (Minor Version Compatibility). These are the MINOR-VERSION COMPATIBILITY MINIMUMS - the documented minimum driver below which an application built with any toolkit of that CUDA major family is not expected to run without a CUDA forward-compatibility package (datacenter GPUs only). They are NOT the TOOLKIT-CORRESPONDING/PACKAGED DRIVER versions (the drivers shipped with each toolkit release, listed in the CUDA Toolkit Release Notes) - do not confuse the two concepts. Within a family, newer-minor toolkits run on these drivers subject to caveats: features requiring a newer driver and newer PTX may still fail. Values: 11.x per NVIDIA docs (Linux 450.80.02 / Windows 452.39, the R450 minor-compat baseline); 12.x per NVIDIA docs (Linux 525.60.13 / Windows 528.33, the R525/R528 baseline); 13.x per NVIDIA docs the family rule is branch-level - driver branch >= 580 on both platforms (the specific 580.65.06 Linux / 580.88 Windows releases are the drivers packaged with the CUDA 13.0 toolkit, not the family minimum, and are deliberately not used here). A CUDA major family absent from this table is UNKNOWN by design: no inference from older families.",
   "minor_version_compatibility": {
     "11": {
       "linux": ">=450.80.02",
@@ -10,8 +10,8 @@
       "windows": ">=528.33"
     },
     "13": {
-      "linux": ">=580.65.06",
-      "windows": ">=580.88"
+      "linux": ">=580",
+      "windows": ">=580"
     }
   }
 }

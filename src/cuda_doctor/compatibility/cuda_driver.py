@@ -9,7 +9,11 @@ NVIDIA's *CUDA minor-version compatibility* documentation (CUDA 11+):
   family minimum (with caveats: newer driver-dependent features and newer
   PTX may still fail);
 - the driver shipped with a toolkit release is a *different concept* from
-  the minor-compatibility minimum and is deliberately not stored here.
+  the minor-compatibility minimum and is deliberately not stored here;
+- family minimums may be exact patch releases (e.g. 525.60.13) or a
+  branch-level rule (e.g. >= 580 for the R580-based CUDA 13.x family) —
+  ``compare_versions`` zero-pads, so the one-component ``(580,)`` minimum
+  is satisfied by 580.65.06, 590.44.1, and any newer driver.
 
 Lookups are exact per major family: a CUDA family that is absent from the
 data (e.g. a future CUDA 14) is UNKNOWN — never inferred from an older

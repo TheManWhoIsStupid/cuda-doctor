@@ -40,8 +40,45 @@ class TestDriverCompatibility:
         )
         assert (
             compat.driver.family_minimum(CudaVersion(13, 0), Platform.LINUX)
-            == (580, 65, 6)
+            == (580,)
         )
+        assert (
+            compat.driver.family_minimum(CudaVersion(13, 1), Platform.WINDOWS)
+            == (580,)
+        )
+
+    def test_cuda13_family_rule_is_branch_level(self, compat):
+        # NVIDIA documents the CUDA 13.x minor-compatibility range as the R580
+        # branch (driver >= 580), not an exact patch release: the 580.65.06 /
+        # 580.88 drivers are the ones *packaged with* the CUDA 13.0 toolkit and
+        # must not be stored as the family minimum.
+        linux = compat.driver.family_minimum(CudaVersion(13, 0), Platform.LINUX)
+        windows = compat.driver.family_minimum(CudaVersion(13, 0), Platform.WINDOWS)
+        assert linux == (580,) and len(linux) == 1
+        assert windows == (580,) and len(windows) == 1
+
+    def test_cuda13_r580_driver_satisfies_family_minimum(self, compat):
+        # Any 580.x driver (e.g. the one shipped with CUDA 13.0) satisfies
+        # the >= 580 branch rule via zero-padded comparison.
+        verdict = compat.driver.evaluate(CudaVersion(13, 0), (580, 65, 6), Platform.LINUX)
+        assert verdict.compatible is True
+        assert (
+            compat.driver.evaluate(CudaVersion(13, 2), (580, 88), Platform.WINDOWS)
+        ).compatible is True
+
+    def test_cuda13_newer_driver_branch_is_compatible(self, compat):
+        # A 590.x driver is above the family minimum: normal backward
+        # compatibility, no toolkit-driver pairing required.
+        verdict = compat.driver.evaluate(CudaVersion(13, 0), (590, 44, 1), Platform.LINUX)
+        assert verdict.compatible is True
+
+    def test_cuda13_driver_below_family_branch_minimum(self, compat):
+        # An R575 driver is below the documented R580-family minimum.
+        verdict = compat.driver.evaluate(CudaVersion(13, 0), (575, 57, 8), Platform.LINUX)
+        assert verdict.compatible is False
+        assert "580" in verdict.message
+        windows = compat.driver.evaluate(CudaVersion(13, 0), (575, 12), Platform.WINDOWS)
+        assert windows.compatible is False
 
     def test_future_major_is_unknown_not_inherited(self, compat):
         # CUDA 14 must NOT reuse CUDA 13 requirements (or any older family).

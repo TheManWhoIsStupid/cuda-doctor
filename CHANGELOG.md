@@ -16,8 +16,9 @@ Target: v0.1.1 — correctness pass on CUDA compatibility semantics
   compatibility model instead of treating the `nvidia-smi` CUDA version as a
   strict ceiling. The bundled driver table stores the documented per-family
   minimums (11.x: Linux 450.80.02 / Windows 452.39; 12.x: 525.60.13 / 528.33;
-  13.x: 580.65.06 / 580.88) and no longer mixes them with the
-  drivers-shipped-with-toolkit-releases table.
+  13.x: the R580 branch rule, `>= 580` on both platforms — not the 580.65.06 /
+  580.88 drivers packaged with the CUDA 13.0 toolkit) and no longer mixes them
+  with the drivers-shipped-with-toolkit-releases table.
 - `DRV002`: a toolkit minor above the driver's reported CUDA UMD version
   within the same CUDA generation is now at most INFO (minor-version
   compatibility applies, with PTX/feature caveats). Hard findings are
@@ -28,6 +29,19 @@ Target: v0.1.1 — correctness pass on CUDA compatibility semantics
   observed runtime success overrides static version comparisons. `TORCH002`
   now folds the documented family minimum into its evidence as a likely
   cause when the driver is below it.
+- `TORCH002`/`TORCH006` de-duplication: when CUDA is *observed* unavailable
+  (`is_available()` False), `TORCH002` is the single primary diagnosis and
+  carries the static driver evidence (generation gap, documented family
+  minimum) as likely causes — `TORCH006` no longer adds a second ERROR for
+  the same root cause. `TORCH006` now speaks only when the availability
+  probe itself failed (`None`), worded conservatively to note that runtime
+  behavior was not directly confirmed.
+- Terminology: user-facing output no longer labels the `nvidia-smi` CUDA
+  version a maximum. The terminal report says "Reported CUDA" (was
+  "Max CUDA"), the Markdown report says "reported CUDA X.Y", and issue
+  wording says "reported CUDA" — reflecting that CUDA minor-version
+  compatibility makes the reported version a validated-with generation, not
+  a hard ceiling.
 - Unknown/future CUDA versions are UNKNOWN: removed the nearest-lower
   fallback in driver and compiler lookups, so CUDA 14 no longer inherits
   CUDA 13 rules and an unlisted toolkit minor no longer inherits compiler

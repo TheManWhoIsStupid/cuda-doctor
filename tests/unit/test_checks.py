@@ -197,7 +197,7 @@ class TestDriverChecks:
         assert "525.60.13" in issues[0].description
 
     def test_drv002_error_when_minor_compat_minimum_not_met(self):
-        # Windows edge: 527.41 reports max CUDA 12.0 but is below the CUDA
+        # Windows edge: 527.41 reports CUDA 12.0 but is below the CUDA
         # 12.x minor-compat minimum (528.33), so toolkit 12.6 is an error.
         snapshot = base_snapshot()
         snapshot.system = replace(snapshot.system, platform=Platform.WINDOWS)
@@ -408,19 +408,44 @@ class TestPyTorchChecks:
         snapshot.pytorch = replace(snapshot.pytorch, cuda_version="12.6")
         assert run_check(PyTorchNewerThanDriver, snapshot) == []
 
-    def test_torch006_error_only_across_generations(self):
-        # torch built for CUDA 12 on a CUDA 11-generation driver, with CUDA
-        # observed unavailable -> the driver generation is the verdict.
+    def test_torch006_error_across_generations_when_probe_unknown(self):
+        # torch built for CUDA 12 on a CUDA 11-generation driver, and the
+        # availability probe could not produce a boolean -> TORCH006 provides
+        # the static generation-gap verdict, conservatively worded.
         snapshot = base_snapshot()
         snapshot.driver = replace(snapshot.driver, version="470.42.01", cuda_version="11.4")
         snapshot.pytorch = replace(
-            snapshot.pytorch, cuda_version="12.4", cuda_available=False, devices=[]
+            snapshot.pytorch, cuda_version="12.4", cuda_available=None, devices=[]
         )
         issues = run_check(PyTorchNewerThanDriver, snapshot)
         assert len(issues) == 1
         assert issues[0].severity is Severity.ERROR
         assert "newer generation" in issues[0].title
         assert "forward-compatibility" in issues[0].description
+        assert "could not be determined" in issues[0].description
+
+    def test_torch006_silent_across_generations_when_cuda_unavailable(self):
+        # De-duplication: with cuda_available False, TORCH002 is the primary
+        # diagnosis and carries the generation gap as evidence — TORCH006
+        # must not add a second ERROR for the same root cause.
+        snapshot = base_snapshot()
+        snapshot.driver = replace(snapshot.driver, version="470.42.01", cuda_version="11.4")
+        snapshot.pytorch = replace(
+            snapshot.pytorch, cuda_version="12.4", cuda_available=False, devices=[]
+        )
+        assert run_check(PyTorchNewerThanDriver, snapshot) == []
+
+    def test_torch002_carries_generation_gap_as_likely_cause(self):
+        # The evidence TORCH002 folds in when TORCH006 steps aside.
+        snapshot = base_snapshot()
+        snapshot.driver = replace(snapshot.driver, version="470.42.01", cuda_version="11.4")
+        snapshot.pytorch = replace(snapshot.pytorch, cuda_available=False, devices=[])
+        issues = run_check(PyTorchCudaUnavailable, snapshot)
+        assert len(issues) == 1
+        assert any(
+            "CUDA 11.x generation" in line and "likely cause" in line
+            for line in issues[0].evidence
+        )
 
     def test_torch006_silent_across_generations_when_cuda_works(self):
         # The invariant holds even for a genuine cross-generation gap:
@@ -430,21 +455,33 @@ class TestPyTorchChecks:
         snapshot.pytorch = replace(snapshot.pytorch, cuda_version="12.4")
         assert run_check(PyTorchNewerThanDriver, snapshot) == []
 
-    def test_torch006_error_below_documented_family_minimum(self):
+    def test_torch006_error_below_family_minimum_when_probe_unknown(self):
         # Same generation on paper (no UMD version), but the driver is below
-        # the documented CUDA 12.x minimum while torch reports CUDA unusable.
+        # the documented CUDA 12.x minimum and the probe result is unknown ->
+        # TORCH006 still provides the static diagnosis.
         snapshot = base_snapshot()
         snapshot.driver = replace(snapshot.driver, version="515.43.04", cuda_version=None)
         snapshot.pytorch = replace(
-            snapshot.pytorch, cuda_available=False, devices=[]
+            snapshot.pytorch, cuda_available=None, devices=[]
         )
         issues = run_check(PyTorchNewerThanDriver, snapshot)
         assert len(issues) == 1
         assert issues[0].severity is Severity.ERROR
         assert "525.60.13" in issues[0].description
+        assert "could not be determined" in issues[0].description
+
+    def test_torch006_silent_below_family_minimum_when_cuda_unavailable(self):
+        # De-duplication: TORCH002 already names the below-minimum driver as
+        # a likely cause; no second ERROR from TORCH006.
+        snapshot = base_snapshot()
+        snapshot.driver = replace(snapshot.driver, version="515.43.04", cuda_version=None)
+        snapshot.pytorch = replace(
+            snapshot.pytorch, cuda_available=False, devices=[]
+        )
+        assert run_check(PyTorchNewerThanDriver, snapshot) == []
 
     def test_torch006_silent_for_same_family_minor_gap(self):
-        # torch 12.6 vs driver max 12.4 with CUDA unavailable: not TORCH006's
+        # torch 12.6 vs driver-reported 12.4 with CUDA unavailable: not TORCH006's
         # business — minor-version compatibility applies and TORCH002 carries
         # the diagnosis. No duplicate/contradictory finding here.
         snapshot = base_snapshot()

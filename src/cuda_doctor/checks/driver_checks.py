@@ -82,8 +82,8 @@ class DriverRuntimeCompatibility(Check):
                     title="CUDA Toolkit is from a newer CUDA generation than the driver",
                     description=(
                         f"nvcc reports CUDA {toolkit}, but the driver "
-                        f"({driver.version}, max CUDA {driver_max}) belongs to the "
-                        f"CUDA {driver_max.major}.x generation. Applications built "
+                        f"({driver.version}, reported CUDA {driver_max}) belongs to "
+                        f"the CUDA {driver_max.major}.x generation. Applications built "
                         "with this toolkit are not expected to run on this driver "
                         "unless a CUDA forward-compatibility package is installed "
                         "(datacenter GPUs only, per NVIDIA documentation)."

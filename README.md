@@ -31,7 +31,7 @@ System
   ...
 NVIDIA Driver
   Version         580.126.09
-  Max CUDA        13.0
+  Reported CUDA   13.0
 ...
 Summary
   Status: HEALTHY  (2 info)
@@ -87,7 +87,8 @@ That third point is the one most tools get wrong. Since CUDA 11, NVIDIA
 supports **CUDA minor-version compatibility**: within a CUDA major family
 (e.g. any CUDA 12.x), applications built with a newer minor release run on
 older drivers of the same generation, as long as the driver meets the
-documented family minimum (Linux 525.60.13 / Windows 528.33 for CUDA 12.x).
+documented family minimum (Linux 525.60.13 / Windows 528.33 for CUDA 12.x;
+for CUDA 13.x the documented rule is the R580 driver branch, i.e. >= 580).
 So "toolkit 12.6, nvidia-smi says 12.2" is at most an informational note
 (`DRV002` INFO), not an error — with the caveats that newer
 driver-dependent features and newer PTX may still need a driver update.

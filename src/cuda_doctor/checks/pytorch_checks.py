@@ -2,11 +2,17 @@
 
 The torch/CUDA relationship is subtle, and these checks encode the product's
 most important nuances: a local-toolkit/runtime version difference is normally
-harmless (TORCH004 stays INFO); a runtime from a newer CUDA *generation* than
-the driver's is a real error (TORCH006); a newer minor within the same family
-is covered by CUDA minor-version compatibility and is never an error by
-itself; and observed runtime success (``torch.cuda.is_available()`` True)
-always overrides static version comparisons.
+harmless (TORCH004 stays INFO); a newer minor within the same CUDA family is
+covered by minor-version compatibility and is never an error by itself; and
+observed runtime success (``torch.cuda.is_available()`` True) always overrides
+static version comparisons.
+
+One root cause gets one diagnosis: when CUDA is *observed* unavailable
+(``cuda_available`` False), TORCH002 is the primary finding and folds the
+static driver evidence (generation gap, documented family minimum) into
+itself as a likely cause — TORCH006 must not repeat it. TORCH006 only speaks
+when the availability probe itself could not produce a boolean (``None``),
+worded conservatively because runtime behavior was not directly confirmed.
 """
 
 from __future__ import annotations
@@ -78,7 +84,13 @@ class PyTorchImportFailed(Check):
 
 
 class PyTorchCudaUnavailable(Check):
-    """TORCH002: CUDA build but torch.cuda.is_available() is False."""
+    """TORCH002: CUDA build but torch.cuda.is_available() is False.
+
+    The *primary* diagnosis for observed CUDA unavailability: any static
+    driver-compatibility evidence (generation gap, documented family minimum)
+    is folded in here as a likely cause instead of being duplicated by
+    TORCH006.
+    """
 
     code = "TORCH002"
     category = "pytorch"
@@ -89,21 +101,36 @@ class PyTorchCudaUnavailable(Check):
             return []
         if torch_info.cuda_available is not False:
             return []
+        torch_cuda = parse_cuda_version(torch_info.cuda_version)
+        driver = ctx.snapshot.driver
+        driver_version = driver.version if driver is not None else None
+        driver_max = (
+            parse_cuda_version(driver.cuda_version)
+            if driver is not None and driver.cuda_version
+            else None
+        )
+        installed = parse_driver_version(driver_version) if driver_version else None
         evidence = [
             f"torch {torch_info.version} (built for CUDA {torch_info.cuda_version})",
             "torch.cuda.is_available() -> False",
         ]
-        driver = ctx.snapshot.driver
-        driver_version = driver.version if driver is not None else None
         if driver is not None and driver.cuda_version:
             evidence.append(
                 f"driver CUDA UMD version: {driver.cuda_version} "
                 "(the toolkit generation the driver was validated with)"
             )
-        # Fold the documented family minimum into the evidence: when the
-        # driver is below it, that is the likely cause (see also TORCH006).
-        torch_cuda = parse_cuda_version(torch_info.cuda_version)
-        installed = parse_driver_version(driver_version) if driver_version else None
+        # Fold the static driver evidence in as likely causes — TORCH002 owns
+        # the observed-unavailable case, so TORCH006 must not repeat it.
+        if (
+            driver_max is not None
+            and torch_cuda is not None
+            and driver_max.major < torch_cuda.major
+        ):
+            evidence.append(
+                f"driver CUDA UMD version {driver_max} is from the CUDA "
+                f"{driver_max.major}.x generation, older than this build's "
+                f"CUDA {torch_cuda} — a likely cause"
+            )
         if (
             ctx.compatibility is not None
             and torch_cuda is not None
@@ -197,14 +224,15 @@ class PyTorchRuntimeDiffers(Check):
 
 
 class PyTorchNewerThanDriver(Check):
-    """TORCH006: torch's runtime needs a newer driver *generation*.
+    """TORCH006: static torch/driver incompatibility when the probe is silent.
 
-    Uses the CUDA major-family model, so a newer minor within the same family
-    is NOT an error by itself (that is minor-version compatibility; if CUDA is
-    unavailable there, TORCH002 carries the diagnosis). Observed runtime
-    success always overrides the static comparison: when
-    ``torch.cuda.is_available()`` is True, this check stays silent no matter
-    what the version numbers say.
+    Speaks only when the availability probe could not produce a reliable
+    boolean (``cuda_available`` is None) and there is strong static evidence:
+    a CUDA major-generation mismatch, or a driver below the documented family
+    minimum. When CUDA is *observed* unavailable (False), TORCH002 is the
+    primary diagnosis and carries the driver evidence itself, so this check
+    stays silent to avoid a second ERROR for the same root cause; observed
+    success (True) always overrides static comparisons as well.
     """
 
     code = "TORCH006"
@@ -216,14 +244,18 @@ class PyTorchNewerThanDriver(Check):
         torch_cuda = parse_cuda_version(torch_info.cuda_version)
         if torch_cuda is None:
             return []
+        if torch_info.cuda_available is not None:
+            # True -> observed success wins; False -> TORCH002 owns it.
+            return []
         driver = snapshot.driver
         if driver is None or not driver.version:
             return []
-        if torch_info.cuda_available is True:
-            # Observed working runtime beats any static heuristic.
-            return []
 
         driver_max = parse_cuda_version(driver.cuda_version) if driver.cuda_version else None
+        unconfirmed = (
+            "torch.cuda.is_available() could not be determined, so runtime "
+            "behavior was not directly confirmed."
+        )
 
         # Torch's CUDA generation is beyond the driver's.
         if driver_max is not None and driver_max.major < torch_cuda.major:
@@ -233,16 +265,17 @@ class PyTorchNewerThanDriver(Check):
                     title="PyTorch CUDA runtime is from a newer generation than the driver",
                     description=(
                         f"PyTorch was built for CUDA {torch_cuda}, but the installed "
-                        f"driver ({driver.version}, max CUDA {driver_max}) belongs to "
-                        f"the CUDA {driver_max.major}.x generation. torch.cuda is not "
-                        "expected to work on this driver unless a CUDA "
-                        "forward-compatibility package is installed (datacenter GPUs "
-                        "only) — updating the driver (or installing a PyTorch build "
-                        "for an older CUDA) is the usual fix."
+                        f"driver ({driver.version}, reported CUDA {driver_max}) "
+                        f"belongs to the CUDA {driver_max.major}.x generation. "
+                        "torch.cuda is not expected to work on this driver unless a "
+                        "CUDA forward-compatibility package is installed (datacenter "
+                        "GPUs only) — updating the driver (or installing a PyTorch "
+                        f"build for an older CUDA) is the usual fix. {unconfirmed}"
                     ),
                     evidence=[
                         f"torch.version.cuda = {torch_cuda}",
                         f"driver {driver.version} (CUDA UMD version {driver_max})",
+                        "torch.cuda.is_available() -> unknown",
                     ],
                     recommendations=recommendations_for(self.code),
                 )
@@ -263,11 +296,12 @@ class PyTorchNewerThanDriver(Check):
                         description=(
                             f"{verdict.message} PyTorch was built for CUDA "
                             f"{torch_cuda}; a driver this old is a likely reason "
-                            "torch.cuda is unavailable."
+                            f"torch.cuda is unavailable. {unconfirmed}"
                         ),
                         evidence=[
                             f"torch.version.cuda = {torch_cuda}",
                             f"driver: {driver.version}",
+                            "torch.cuda.is_available() -> unknown",
                         ],
                         recommendations=recommendations_for(self.code),
                     )

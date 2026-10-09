@@ -137,7 +137,7 @@ class TerminalReporter(Reporter):
         else:
             self._kv(console, "Version", redact_text(driver.version))
         if driver and driver.cuda_version:
-            self._kv(console, "Max CUDA", driver.cuda_version)
+            self._kv(console, "Reported CUDA", driver.cuda_version)
         console.print()
 
     def _cuda(self, console: Console, snapshot: EnvironmentSnapshot) -> None:
@@ -242,7 +242,7 @@ class TerminalReporter(Reporter):
         torch_cuda = parse_cuda_version(snapshot.pytorch.cuda_version)
 
         if driver_max is None:
-            self._kv(console, "Driver max CUDA", "unknown")
+            self._kv(console, "Driver CUDA", "unknown")
         if toolkit is not None and driver_max is not None:
             self._kv(
                 console,

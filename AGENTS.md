@@ -24,3 +24,29 @@
   `AGENTS.md`, the README, and the code.
 - Never commit files under `.agent-private/`, and never use `git add -f` to
   bypass its ignore rule.
+
+## GitHub credential security
+
+- Agents may use an already authenticated GitHub CLI (`gh`) only for
+  repository operations the user has explicitly approved (for example,
+  creating releases or working with pull requests).
+- GitHub authentication and authorization must always be completed
+  interactively by the user. Agents may initiate the official login flow and
+  present the device-code instructions, but must never authorize, approve,
+  or substitute for the user.
+- Agents must never print, inspect, reveal, export, copy, log, or persist
+  GitHub authentication tokens or credentials. Never run `gh auth token`.
+- Never read GitHub CLI credential/config files for the purpose of
+  extracting credentials, and never read system credential stores, shell
+  history, environment variables, or other secret-storage locations to
+  discover GitHub tokens.
+- Never write GitHub credentials into repository files, `.agent-private/`,
+  temporary project files, logs, prompts, or commit messages. Never convert
+  an existing authenticated session into a plaintext token file.
+- Never create a personal access token unless the user explicitly decides
+  to do so outside the Agent workflow.
+- Authentication changes, re-authentication, logout, permission expansion,
+  and scope changes require explicit user involvement.
+- Use the authenticated GitHub session only for the repository operation
+  explicitly requested by the user.
+- Git operations should continue using the existing SSH configuration.

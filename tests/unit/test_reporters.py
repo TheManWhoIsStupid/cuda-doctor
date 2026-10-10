@@ -213,12 +213,17 @@ class TestJsonReporter:
             snapshot.environment,
             path_entries=[(0, "/home/secretuser/.npm-global/bin"), (1, "/usr/bin")],
             ld_library_path="/home/secretuser/.local/lib:/usr/lib",
+            ld_library_path_entries=[(0, "/home/secretuser/.local/lib"), (1, "/usr/lib")],
         )
         payload = JsonReporter.build(inputs_for(snapshot))
         env = payload["environment"]["environment"]
         assert "path_entries" not in env
         assert "ld_library_path" not in env
+        assert "ld_library_path_entries" not in env
         assert ".npm-global" not in JsonReporter().render(inputs_for(snapshot))
+        # The ordered entries are popped before redaction, so neither the raw
+        # path nor a "~"-prefixed reconstruction can leak.
+        assert ".local/lib" not in JsonReporter().render(inputs_for(snapshot))
         # The CUDA-relevant subsets remain.
         assert "cuda_path_entries" in env
 

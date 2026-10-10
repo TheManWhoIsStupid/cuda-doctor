@@ -16,6 +16,11 @@ from cuda_doctor.utils.platform import current_platform
 
 SCALAR_VARIABLES = ("CUDA_HOME", "CUDA_PATH")
 
+# v0.2 diagnosis inputs, captured raw. Unlike SCALAR_VARIABLES these are
+# captured on *presence*, not truthiness: ``CUDA_VISIBLE_DEVICES=""`` masks
+# all GPUs, so an empty value is a meaningful observation, not an unset one.
+PRESENCE_VARIABLES = ("CUDACXX", "CUDA_VISIBLE_DEVICES", "CONDA_PREFIX")
+
 
 class EnvironmentCollector:
     """Collects CUDA-relevant environment variable facts."""
@@ -41,6 +46,9 @@ class EnvironmentCollector:
         for name in SCALAR_VARIABLES:
             if lookup.get(name):
                 info.variables[name] = lookup[name]
+        for name in PRESENCE_VARIABLES:
+            if name in lookup:
+                info.variables[name] = lookup[name]
         for key, value in sorted(lookup.items()):
             if key.startswith("CUDA_PATH_V") and value:
                 info.variables[key] = value
@@ -58,6 +66,14 @@ class EnvironmentCollector:
                 info.ld_library_path = ld
                 info.cuda_ld_library_entries = [
                     entry for entry in ld.split(":") if is_cuda_related(entry)
+                ]
+                # Ordered raw entries for later v0.2 diagnosis phases. Like
+                # the PATH loop above, empty entries are skipped but keep
+                # their original position. Never serialized in reports.
+                info.ld_library_path_entries = [
+                    (index, entry)
+                    for index, entry in enumerate(ld.split(":"))
+                    if entry
                 ]
         return info
 

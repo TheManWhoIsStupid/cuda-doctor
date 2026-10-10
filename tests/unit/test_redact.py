@@ -55,3 +55,22 @@ class TestRedactValue:
     def test_empty_home_normalizes_only(self):
         out = redact_value({"s": "/home/alice/x", "sev": Severity.ERROR}, home="")
         assert out == {"s": "/home/alice/x", "sev": "ERROR"}
+
+
+class TestV02VariableRedaction:
+    def test_new_environment_variable_values_redacted(self):
+        # CUDACXX / CONDA_PREFIX carry home paths once collected; an empty
+        # CUDA_VISIBLE_DEVICES must survive redaction unchanged.
+        out = redact_value(
+            {
+                "variables": {
+                    "CUDACXX": "/home/alice/toolkits/cuda/bin/nvcc",
+                    "CONDA_PREFIX": "/home/alice/miniconda3",
+                    "CUDA_VISIBLE_DEVICES": "",
+                }
+            },
+            home=HOME,
+        )
+        assert out["variables"]["CUDACXX"] == "~/toolkits/cuda/bin/nvcc"
+        assert out["variables"]["CONDA_PREFIX"] == "~/miniconda3"
+        assert out["variables"]["CUDA_VISIBLE_DEVICES"] == ""

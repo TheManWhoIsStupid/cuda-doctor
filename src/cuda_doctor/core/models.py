@@ -17,6 +17,7 @@ from cuda_doctor.utils.redact import redact_value
 __all__ = [
     "CUDAInfo",
     "CUDAInstallation",
+    "CUDASelectorObservation",
     "CompilerInfo",
     "DriverInfo",
     "EnvironmentInfo",
@@ -25,6 +26,8 @@ __all__ = [
     "NvidiaSmiInfo",
     "PyTorchInfo",
     "PythonInfo",
+    "RuntimeLibraryCandidate",
+    "RuntimeLibraryInventory",
     "SystemInfo",
     "ToolInfo",
     "TorchDevice",
@@ -79,6 +82,28 @@ class CUDAInstallation:
 
 
 @dataclass
+class CUDASelectorObservation:
+    """Raw observation of one CUDA toolkit selector (v0.2 diagnosis input).
+
+    Records only what was observed about a selector such as ``cuda_home``,
+    ``cuda_path``, ``cudacxx``, ``nvcc``, ``path_cuda_bin`` or
+    ``usr_local_cuda``. Whether a selector is *active*, conflicting or
+    diagnosis-relevant is decided later by the diagnosis fact layer — this
+    model deliberately carries no such policy fields.
+    """
+
+    name: str
+    raw_value: str | None = None
+    resolved_path: str | None = None
+    canonical_path: str | None = None
+    canonical_root: str | None = None
+    toolkit_version: str | None = None
+    exists: bool | None = None
+    valid: bool | None = None
+    version_source: str | None = None
+
+
+@dataclass
 class CUDAInfo:
     """CUDA Toolkit facts."""
 
@@ -91,6 +116,10 @@ class CUDAInfo:
     cuda_home_has_nvcc: bool | None = None
     installations: list[CUDAInstallation] = field(default_factory=list)
     windows_cuda_path_vars: dict[str, str] = field(default_factory=dict)
+    # Raw selector observations (v0.2). Initially empty; populated by CUDA
+    # collection in a later phase. Values intentionally duplicate existing
+    # fields (e.g. nvcc_path) — consistency is tested, not assumed.
+    selector_observations: list[CUDASelectorObservation] = field(default_factory=list)
 
 
 @dataclass
@@ -170,6 +199,44 @@ class EnvironmentInfo:
     cuda_path_entries: list[tuple[int, str]] = field(default_factory=list)
     ld_library_path: str | None = None
     cuda_ld_library_entries: list[str] = field(default_factory=list)
+    # Ordered raw LD_LIBRARY_PATH entries (v0.2, non-Windows targets only).
+    # Internal diagnostic state: this full list is never serialized —
+    # ``snapshot_to_dict`` removes it exactly like ``path_entries``.
+    ld_library_path_entries: list[tuple[int, str]] = field(default_factory=list)
+
+
+@dataclass
+class RuntimeLibraryCandidate:
+    """One observed CUDA runtime library file (v0.2 diagnosis input).
+
+    Inventory only: the collector records where a library of a supported
+    family (``libcudart`` / ``libcublas`` / ``libcudnn``) was found. Whether
+    a candidate conflicts with anything, or would actually be loaded, is
+    decided later by the diagnosis layer — never here.
+    """
+
+    family: str
+    path: str
+    canonical_path: str | None = None
+    soname: str | None = None
+    version: str | None = None
+    version_source: str | None = None
+    origin: str = ""
+    search_group: str = ""
+    search_order: int | None = None
+
+
+@dataclass
+class RuntimeLibraryInventory:
+    """Bounded runtime-library inventory plus per-root scan failures.
+
+    ``scan_errors`` lets one inaccessible root fail without discarding
+    candidates from the other roots. Inventory only — no loader-winner or
+    conflict semantics live here.
+    """
+
+    candidates: list[RuntimeLibraryCandidate] = field(default_factory=list)
+    scan_errors: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -216,8 +283,9 @@ def snapshot_to_dict(
     ``home`` (or the current home directory). With ``redact=False`` values are
     only normalized (enums to values, tuples to lists).
 
-    The full ``PATH`` and raw ``LD_LIBRARY_PATH`` are never included: reports
-    must stay shareable, so only the CUDA-relevant subsets analyzed in
+    The full ``PATH``, raw ``LD_LIBRARY_PATH`` and the ordered
+    ``ld_library_path_entries`` are never included: reports must stay
+    shareable, so only the CUDA-relevant subsets analyzed in
     ``cuda_path_entries`` / ``cuda_ld_library_entries`` are emitted.
     """
     data = asdict(snapshot)
@@ -225,6 +293,7 @@ def snapshot_to_dict(
     if isinstance(environment, dict):
         environment.pop("path_entries", None)
         environment.pop("ld_library_path", None)
+        environment.pop("ld_library_path_entries", None)
     if redact:
         return redact_value(data, home=home)
     return redact_value(data, home="")

@@ -384,6 +384,82 @@ class TestEnvironmentCollector:
             r"\Windows",
         ]
 
+    def test_v02_environment_variables_captured(self):
+        info = EnvironmentCollector(
+            env={
+                "PATH": "/usr/bin",
+                "CUDACXX": "/opt/cuda-12.4/bin/nvcc",
+                "CUDA_VISIBLE_DEVICES": "0,1",
+                "CONDA_PREFIX": "/opt/conda/envs/torch",
+            },
+            platform=Platform.LINUX,
+        ).collect()
+        assert info.variables["CUDACXX"] == "/opt/cuda-12.4/bin/nvcc"
+        assert info.variables["CUDA_VISIBLE_DEVICES"] == "0,1"
+        assert info.variables["CONDA_PREFIX"] == "/opt/conda/envs/torch"
+
+    def test_cuda_visible_devices_empty_string_is_meaningful(self):
+        # "" masks all GPUs (Phase-0-verified CUDA semantics), so it must be
+        # preserved as an observed value — distinct from the variable being
+        # unset (absent from `variables` entirely).
+        info = EnvironmentCollector(
+            env={"PATH": "/usr/bin", "CUDA_VISIBLE_DEVICES": ""}, platform=Platform.LINUX
+        ).collect()
+        assert info.variables["CUDA_VISIBLE_DEVICES"] == ""
+
+    def test_scalar_variables_keep_truthy_only_semantics(self):
+        # v0.1.x behavior unchanged: an empty CUDA_HOME is NOT promoted to an
+        # observation (only the new PRESENCE_VARIABLES capture empty values).
+        info = EnvironmentCollector(
+            env={"PATH": "/usr/bin", "CUDA_HOME": ""}, platform=Platform.LINUX
+        ).collect()
+        assert info.variables == {}
+
+    def test_cuda_visible_devices_captured_on_windows_with_case_folding(self):
+        info = EnvironmentCollector(
+            env={"PATH": r"C:\Windows", "cuda_visible_devices": "-1"},
+            platform=Platform.WINDOWS,
+        ).collect()
+        assert info.variables["CUDA_VISIBLE_DEVICES"] == "-1"
+
+    def test_ld_library_path_entries_ordered_linux(self):
+        info = EnvironmentCollector(
+            env={"PATH": "/usr/bin", "LD_LIBRARY_PATH": "/usr/local/cuda/lib64:/opt/lib"},
+            platform=Platform.LINUX,
+        ).collect()
+        assert info.ld_library_path_entries == [
+            (0, "/usr/local/cuda/lib64"),
+            (1, "/opt/lib"),
+        ]
+
+    def test_ld_library_path_entries_preserve_index_across_empty_segments(self):
+        info = EnvironmentCollector(
+            env={"PATH": "/usr/bin", "LD_LIBRARY_PATH": "/a::/b:"},
+            platform=Platform.LINUX,
+        ).collect()
+        # Empty segments are skipped exactly like PATH entries, while the
+        # original positions (indexes) are kept.
+        assert info.ld_library_path_entries == [(0, "/a"), (2, "/b")]
+
+    def test_ld_library_path_entries_empty_when_unset(self):
+        info = EnvironmentCollector(env={"PATH": "/usr/bin"}, platform=Platform.LINUX).collect()
+        assert info.ld_library_path is None
+        assert info.ld_library_path_entries == []
+
+    def test_windows_target_has_no_ordered_ld_library_path(self):
+        # The ordered representation is gated exactly like the raw
+        # ld_library_path: a Windows target never collects it, regardless of
+        # what the (simulated) environment contains or the host OS is.
+        info = EnvironmentCollector(
+            env={
+                "PATH": r"C:\Windows",
+                "LD_LIBRARY_PATH": "/usr/local/cuda/lib64:/opt/lib",
+            },
+            platform=Platform.WINDOWS,
+        ).collect()
+        assert info.ld_library_path is None
+        assert info.ld_library_path_entries == []
+
 
 class TestPythonEnvCollector:
     def test_system_python_outside_venv(self, monkeypatch):

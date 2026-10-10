@@ -9,6 +9,7 @@ observes the real host (§4 DLP/toolkit roots come from tmp_path, and
 from __future__ import annotations
 
 import os
+import site
 import tempfile
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from cuda_doctor.collectors.runtime_libraries import (
     VERSION_SOURCE_SYMLINK_TARGET,
     VERSION_SOURCE_UNKNOWN,
     RuntimeLibraryCollector,
+    _default_site_packages,
     toolkit_library_roots,
 )
 from cuda_doctor.core.enums import Platform
@@ -298,6 +300,92 @@ class TestPythonPackageInventory:
         )
         assert inventory.candidates == []
         assert inventory.scan_errors == {}
+
+
+class TestDefaultSiteRoots:
+    """Review fix: the default root set includes the ACTIVE user site."""
+
+    USER_SITE = "/home/alice/.local/lib/python3.11/site-packages"
+    SYSTEM_SITES = ("/venv/lib/python3.11/site-packages", "/usr/lib/python3/dist-packages")
+
+    def _pin(self, monkeypatch, *, enabled, user_site=USER_SITE, system=SYSTEM_SITES):
+        monkeypatch.setattr(site, "getsitepackages", lambda: list(system))
+        monkeypatch.setattr(site, "ENABLE_USER_SITE", enabled)
+        if callable(user_site):
+            monkeypatch.setattr(site, "getusersitepackages", user_site)
+        else:
+            monkeypatch.setattr(site, "getusersitepackages", lambda: user_site)
+
+    def test_system_roots_remain_included(self, monkeypatch):
+        self._pin(monkeypatch, enabled=False)
+        assert _default_site_packages() == tuple(self.SYSTEM_SITES)
+
+    def test_enabled_user_site_is_appended(self, monkeypatch):
+        self._pin(monkeypatch, enabled=True)
+        assert _default_site_packages() == (
+            "/venv/lib/python3.11/site-packages",
+            "/usr/lib/python3/dist-packages",
+            self.USER_SITE,
+        )
+
+    def test_disabled_user_site_is_excluded(self, monkeypatch):
+        # Both False and None mean "user-site packages not enabled" for
+        # this interpreter — never scan the user site then.
+        for disabled in (False, None):
+            self._pin(monkeypatch, enabled=disabled)
+            assert _default_site_packages() == tuple(self.SYSTEM_SITES)
+
+    def test_duplicate_root_between_system_and_user_appears_once(self, monkeypatch):
+        self._pin(
+            monkeypatch,
+            enabled=True,
+            system=["/shared/site", "/usr/lib/python3/dist-packages"],
+            user_site="/shared/site",
+        )
+        # Dedup preserves deterministic order: system roots first.
+        assert _default_site_packages() == (
+            "/shared/site",
+            "/usr/lib/python3/dist-packages",
+        )
+
+    def test_user_site_failure_does_not_crash_collection(self, monkeypatch):
+        def unreachable():
+            raise RuntimeError("no user site base")
+
+        self._pin(monkeypatch, enabled=True, user_site=unreachable)
+        # The system roots survive; the helper never raises.
+        assert _default_site_packages() == tuple(self.SYSTEM_SITES)
+
+    def test_user_site_nvidia_libs_follow_the_same_bounded_rule(self, tmp_path):
+        # A pip --user NVIDIA wheel lives under <user-site>/nvidia/<pkg>/lib
+        # and is inventoried exactly like any other injected site root.
+        user_site = tmp_path / ".local" / "lib" / "python3.11" / "site-packages"
+        _lib(user_site / "nvidia" / "cudnn" / "lib", "libcudnn.so.9")
+        inventory = _collect(site_packages=(str(user_site),))
+        candidate = inventory.candidates[0]
+        assert candidate.path == str(user_site / "nvidia" / "cudnn" / "lib" / "libcudnn.so.9")
+        assert candidate.origin == ORIGIN_PYTHON_PACKAGE
+
+    def test_collector_default_flows_from_site_configuration(self, tmp_path, monkeypatch):
+        # End-to-end wiring: without an explicit site_packages injection the
+        # constructor pulls the enabled user site from the site module.
+        user_site = tmp_path / "user-site"
+        _lib(user_site / "nvidia" / "cudnn" / "lib", "libcudnn.so.9")
+        self._pin(monkeypatch, enabled=True, system=[], user_site=str(user_site))
+        inventory = RuntimeLibraryCollector(FakeRunner(), platform=Platform.LINUX).collect()
+        assert [c.origin for c in inventory.candidates] == [ORIGIN_PYTHON_PACKAGE]
+
+    def test_other_python_installations_are_not_scanned(self, tmp_path):
+        # Only exact configured roots are consulted: a sibling installation's
+        # site-packages (e.g. another pythonX.Y) is never discovered.
+        user_site = tmp_path / ".local" / "lib" / "python3.11" / "site-packages"
+        other_install = tmp_path / ".local" / "lib" / "python3.10" / "site-packages"
+        _lib(user_site / "nvidia" / "cublas" / "lib", "libcublas.so.12")
+        _lib(other_install / "nvidia" / "cudnn" / "lib", "libcudnn.so.9")
+        inventory = _collect(site_packages=(str(user_site),))
+        assert [c.path for c in inventory.candidates] == [
+            str(user_site / "nvidia" / "cublas" / "lib" / "libcublas.so.12")
+        ]
 
 
 class TestCondaInventory:

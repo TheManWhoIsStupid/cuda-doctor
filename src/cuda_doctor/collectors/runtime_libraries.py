@@ -14,6 +14,7 @@ import os
 import re
 import site
 from collections.abc import Sequence
+from contextlib import suppress
 from pathlib import Path
 
 from cuda_doctor.core.enums import Platform
@@ -347,11 +348,24 @@ def _toolkit_lib_dirs(root: str) -> list[Path]:
 
 
 def _default_site_packages() -> tuple[str, ...]:
-    """site-packages roots of the *current* interpreter only (§11)."""
-    try:
-        return tuple(dict.fromkeys(site.getsitepackages()))
-    except Exception:  # pragma: no cover - unusual interpreter setups
-        return ()
+    """Site-packages roots of the *current* interpreter only (§11).
+
+    Besides ``site.getsitepackages()`` this includes the interpreter's
+    ACTIVE per-user site (``pip install --user``) — part of the current
+    environment, not a different one — but only when the interpreter
+    reports user-site packages enabled (``site.ENABLE_USER_SITE is
+    True``). Never other users' sites, other installations, or generic
+    ``sys.path``/PYTHONPATH discovery. Roots are deduplicated with the
+    system order first; any failure of either source degrades to fewer
+    roots instead of breaking runtime-library collection.
+    """
+    roots: list[str] = []
+    with suppress(Exception):  # pragma: no cover - unusual interpreter setups
+        roots.extend(site.getsitepackages())
+    if site.ENABLE_USER_SITE is True:
+        with suppress(Exception):  # an unreachable user-site adds no root
+            roots.append(site.getusersitepackages())
+    return tuple(dict.fromkeys(roots))
 
 
 def _family_for_filename(name: str) -> str | None:

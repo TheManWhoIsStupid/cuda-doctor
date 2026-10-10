@@ -437,6 +437,87 @@ class TestCUDACXXObservation:
         ).collect()
         assert "cudacxx" not in _by_name(info)
 
+    def test_windows_exe_fallback_not_applied_on_linux(self, tmp_path):
+        # Fix 1 is Windows-only: on a Linux target a bare "nvcc" must not
+        # silently resolve to an nvcc.exe sitting in the injected PATH entry.
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        exe = bin_dir / "nvcc.exe"
+        exe.write_text("#!/bin/sh\n", encoding="utf-8")
+        exe.chmod(0o755)
+        info = CUDACollector(
+            FakeRunner(),
+            env={"PATH": str(bin_dir), "CUDACXX": "nvcc"},
+            platform=Platform.LINUX,
+            usr_local_cuda_path=str(tmp_path / "absent"),
+        ).collect()
+        obs = _by_name(info)["cudacxx"]
+        assert obs.raw_value == "nvcc"
+        assert obs.resolved_path is None
+        assert obs.exists is False and obs.valid is False
+
+    def test_wrapper_layout_has_no_canonical_root(self, tmp_path):
+        # Fix 2: only <root>/bin/nvcc[.exe] establishes a toolkit root —
+        # a wrapper inside a bin/ directory still records no root identity.
+        tools = tmp_path / "custom" / "bin"
+        tools.mkdir(parents=True)
+        wrapper = tools / "nvcc-wrapper"
+        wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+        wrapper.chmod(0o755)
+        info = CUDACollector(
+            FakeRunner(),
+            env={"PATH": "/nonexistent", "CUDACXX": str(wrapper)},
+            platform=Platform.LINUX,
+            usr_local_cuda_path=str(tmp_path / "absent"),
+        ).collect()
+        obs = _by_name(info)["cudacxx"]
+        assert obs.exists is True and obs.valid is True
+        assert obs.canonical_path == str(wrapper.resolve())
+        assert obs.canonical_root is None
+        assert obs.toolkit_version is None
+
+    def test_nvcc_outside_bin_has_no_canonical_root(self, tmp_path):
+        # Fix 2's parent-directory half: basename nvcc alone is not enough
+        # when the immediate parent is not a bin/ directory.
+        root = tmp_path / "toolkit"
+        root.mkdir()
+        nvcc = root / "nvcc"
+        nvcc.write_text("#!/bin/sh\n", encoding="utf-8")
+        nvcc.chmod(0o755)
+        info = CUDACollector(
+            FakeRunner(),
+            env={"PATH": "/nonexistent", "CUDACXX": str(nvcc)},
+            platform=Platform.LINUX,
+            usr_local_cuda_path=str(tmp_path / "absent"),
+        ).collect()
+        obs = _by_name(info)["cudacxx"]
+        assert obs.canonical_path == str(nvcc.resolve())
+        assert obs.canonical_root is None
+
+    def test_wrapper_with_valid_version_output_keeps_unknown_root(
+        self, tmp_path, fixtures_dir
+    ):
+        # A custom compiler answering like nvcc still contributes DIRECT
+        # version facts; its placement still implies no toolkit identity.
+        tools = tmp_path / "custom" / "tools"
+        tools.mkdir(parents=True)
+        compiler = tools / "ccc"
+        compiler.write_text("#!/bin/sh\n", encoding="utf-8")
+        compiler.chmod(0o755)
+        runner = FakeRunner(
+            {(str(compiler), "--version"): ok(load_fixture(fixtures_dir, "nvcc/nvcc_12_4.txt"))}
+        )
+        info = CUDACollector(
+            runner,
+            env={"PATH": "/nonexistent", "CUDACXX": str(compiler)},
+            platform=Platform.LINUX,
+            usr_local_cuda_path=str(tmp_path / "absent"),
+        ).collect()
+        obs = _by_name(info)["cudacxx"]
+        assert obs.toolkit_version == "12.4"
+        assert obs.version_source == VERSION_SOURCE_DIRECT
+        assert obs.canonical_root is None
+
 
 class TestCUDAHomeObservation:
     def _collect(self, tmp_path, env_extra: dict, runner=None):

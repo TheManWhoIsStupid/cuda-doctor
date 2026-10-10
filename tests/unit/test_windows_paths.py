@@ -11,7 +11,7 @@ from cuda_doctor.collectors.compiler import (
     VSWHERE_RELATIVE_PATH,
     CompilerCollector,
 )
-from cuda_doctor.collectors.cuda import CUDACollector
+from cuda_doctor.collectors.cuda import VERSION_SOURCE_DIRECT, CUDACollector
 from cuda_doctor.core.enums import Platform
 from cuda_doctor.utils.platform import current_platform
 
@@ -237,3 +237,66 @@ class TestWindowsCUDASelectorObservations:
             usr_local_cuda_path=str(tmp_path / "absent"),
         ).collect()
         assert info.nvcc_found is False  # the unsplit entry is not a real directory
+
+    def test_bare_cudacxx_nvcc_resolves_to_nvcc_exe(self, tmp_path, fixtures_dir):
+        # Maintainer review Fix 1: on a Windows target a bare CUDACXX=nvcc
+        # resolves using the target platform's executable naming, finding
+        # nvcc.exe from the injected PATH.
+        toolkit = _make_windows_toolkit(tmp_path)
+        nvcc_bin = toolkit / "bin" / "nvcc.exe"
+        runner = FakeRunner(
+            {(str(nvcc_bin), "--version"): ok(load_fixture(fixtures_dir, "nvcc/nvcc_12_4.txt"))}
+        )
+        info = CUDACollector(
+            runner,
+            env={"PATH": f"C:\\Windows;{toolkit / 'bin'}", "CUDACXX": "nvcc"},
+            platform=Platform.WINDOWS,
+            usr_local_cuda_path=str(tmp_path / "absent"),
+        ).collect()
+        obs = {o.name: o for o in info.selector_observations}["cudacxx"]
+        assert obs.raw_value == "nvcc"
+        assert obs.resolved_path == str(nvcc_bin)
+        assert obs.exists is True and obs.valid is True
+        assert obs.toolkit_version == "12.4"
+        assert obs.version_source == VERSION_SOURCE_DIRECT
+
+    def test_explicit_cudacxx_nvcc_exe_still_resolves(self, tmp_path):
+        # The .exe-suffixed spelling keeps its exact-name resolution.
+        toolkit = _make_windows_toolkit(tmp_path)
+        info = CUDACollector(
+            FakeRunner(),
+            env={"PATH": str(toolkit / "bin"), "CUDACXX": "nvcc.exe"},
+            platform=Platform.WINDOWS,
+            usr_local_cuda_path=str(tmp_path / "absent"),
+        ).collect()
+        obs = {o.name: o for o in info.selector_observations}["cudacxx"]
+        assert obs.raw_value == "nvcc.exe"
+        assert obs.resolved_path == str(toolkit / "bin" / "nvcc.exe")
+
+    def test_bare_cudacxx_resolution_ignores_host_path(self, tmp_path):
+        # A host with nvcc/nvcc.exe installed must not leak into a Windows
+        # target whose injected PATH holds nothing.
+        info = CUDACollector(
+            FakeRunner(),
+            env={"PATH": "/nonexistent-cuda-doctor-xyz", "CUDACXX": "nvcc"},
+            platform=Platform.WINDOWS,
+            usr_local_cuda_path=str(tmp_path / "absent"),
+        ).collect()
+        obs = {o.name: o for o in info.selector_observations}["cudacxx"]
+        assert obs.resolved_path is None
+        assert obs.exists is False
+
+    def test_cudacxx_exe_layout_derives_toolkit_root(self, tmp_path):
+        # Fix 2 on Windows: the bin/nvcc.exe layout is the reliable one —
+        # toolkit root is derived from it.
+        toolkit = _make_windows_toolkit(tmp_path)
+        nvcc_bin = toolkit / "bin" / "nvcc.exe"
+        info = CUDACollector(
+            FakeRunner(),
+            env={"PATH": "C:\\Windows", "CUDACXX": str(nvcc_bin)},
+            platform=Platform.WINDOWS,
+            usr_local_cuda_path=str(tmp_path / "absent"),
+        ).collect()
+        obs = {o.name: o for o in info.selector_observations}["cudacxx"]
+        assert obs.canonical_path == str(nvcc_bin.resolve())
+        assert obs.canonical_root == str(toolkit.resolve())

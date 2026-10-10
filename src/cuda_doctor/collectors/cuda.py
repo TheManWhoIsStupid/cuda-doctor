@@ -155,14 +155,18 @@ class CUDACollector:
         """Observe the CUDACXX selector.
 
         Absolute/path-like values are used as-is; a bare name is resolved
-        against the injected PATH. Per §9.5 the version comes only from the
-        executable ``--version`` probe — never from ``cuda-12.4``-style
-        naming, which is reserved for directory selectors.
+        against the injected PATH (Windows targets additionally try the
+        ``.exe`` form — see :meth:`_resolve_cudacxx`). Per §9.5 the version
+        comes only from the executable ``--version`` probe — never from
+        ``cuda-12.4``-style naming, which is reserved for directory
+        selectors. A toolkit root is recorded only for the reliable
+        ``<root>/bin/nvcc[.exe]`` layout (see :meth:`_cudacxx_canonical_root`);
+        wrappers keep ``canonical_path`` but no invented root identity.
         """
         if "/" in raw or "\\" in raw:
             resolved: str | None = raw
         else:
-            resolved = find_executable_on_path(raw, path_entries)
+            resolved = self._resolve_cudacxx(raw, path_entries)
         exists = False
         valid = False
         canonical_path: str | None = None
@@ -179,7 +183,7 @@ class CUDACollector:
             if exists:
                 canonical_path = self._canonicalize(resolved)
                 if canonical_path:
-                    canonical_root = str(Path(canonical_path).parent.parent)
+                    canonical_root = self._cudacxx_canonical_root(canonical_path)
             if valid:
                 # Probe only real executables; an unparseable or failing
                 # probe yields UNKNOWN — never a root-naming fallback.
@@ -314,6 +318,38 @@ class CUDACollector:
             return str(Path(path_str).resolve(strict=False))
         except (OSError, ValueError, RuntimeError):
             return None
+
+    def _resolve_cudacxx(self, raw: str, path_entries: tuple[str, ...]) -> str | None:
+        """Resolve a bare CUDACXX name against the injected PATH entries.
+
+        Windows targets additionally try the ``.exe`` form (maintainer
+        Phase-2 review, Fix 1): ``CUDACXX=nvcc`` must find ``nvcc.exe``.
+        That single suffix covers the CUDA compiler case — this is not a
+        PATHEXT emulator, and non-Windows targets keep exact-name lookup.
+        """
+        candidates = [raw]
+        if self.platform is Platform.WINDOWS and not raw.lower().endswith(".exe"):
+            candidates.append(f"{raw}.exe")
+        for candidate in candidates:
+            resolved = find_executable_on_path(candidate, path_entries)
+            if resolved:
+                return resolved
+        return None
+
+    def _cudacxx_canonical_root(self, canonical_path: str) -> str | None:
+        """Toolkit root of a CUDACXX executable — only the reliable layout.
+
+        ``<root>/bin/nvcc[.exe]`` is the one layout v0.2 treats as a CUDA
+        toolkit compiler (maintainer Phase-2 review, Fix 2); anything else
+        (wrappers, custom compiler placements) records no root identity —
+        UNKNOWN is preferable to an invented root. The ``--version`` probe
+        is unaffected: a wrapper answering like nvcc still contributes
+        DIRECT version facts alongside a ``None`` root.
+        """
+        path = Path(canonical_path)
+        if path.parent.name == "bin" and path.name in ("nvcc", "nvcc.exe"):
+            return str(path.parent.parent)
+        return None
 
     def _winning_path_entry(
         self, binary_name: str, resolved: str, path_entries: tuple[str, ...]

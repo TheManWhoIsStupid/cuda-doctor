@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields, replace
 
 from cuda_doctor.core.enums import Platform
 from cuda_doctor.core.models import (
@@ -153,6 +153,28 @@ class TestOrderedLdLibraryPathNeverSerialized:
 
 
 class TestSelectorObservationSerialization:
+    def test_selector_observation_fields_are_exactly_the_frozen_set(self):
+        # Freeze guard (frozen architecture §9.1): the observation model
+        # carries raw facts only — activity, conflict, role, confidence and
+        # severity belong to the later diagnosis layers, never here.
+        names = {field.name for field in fields(CUDASelectorObservation)}
+        assert names == {
+            "name",
+            "raw_value",
+            "resolved_path",
+            "canonical_path",
+            "canonical_root",
+            "toolkit_version",
+            "exists",
+            "valid",
+            "version_source",
+        }
+
+    def test_selector_observation_has_no_diagnosis_policy_fields(self):
+        obs = CUDASelectorObservation(name="cuda_home")
+        for forbidden in ("active", "conflicting", "primary", "role", "confidence", "severity"):
+            assert not hasattr(obs, forbidden)
+
     def test_selector_observations_serialize_redacted_like_sibling_fields(self):
         # selector_observations intentionally duplicate already-serialized
         # fields (nvcc_path et al.); they must pass through the same

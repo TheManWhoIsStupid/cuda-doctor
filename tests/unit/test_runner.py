@@ -73,8 +73,8 @@ def test_crashing_collector_is_isolated(monkeypatch):
 
 def test_injected_dependencies_flow_through(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "cuda_doctor.collectors.cuda.find_executable",
-        lambda name: "/opt/cuda/bin/nvcc" if name == "nvcc" else None,
+        "cuda_doctor.collectors.cuda.find_executable_on_path",
+        lambda name, entries: "/opt/cuda/bin/nvcc" if name == "nvcc" else None,
     )
     (tmp_path / "cuda-12.4").mkdir()
     snapshot = CollectionRunner(

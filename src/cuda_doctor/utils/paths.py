@@ -13,11 +13,32 @@ from cuda_doctor.utils.versions import cuda_version_from_path, parse_cuda_versio
 
 LINUX_CUDA_ROOT_DIRS = ("/usr/local", "/opt")
 WINDOWS_TOOLKIT_ROOT = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
+USR_LOCAL_CUDA = "/usr/local/cuda"
 
 
 def find_executable(name: str) -> str | None:
     """Locate an executable on PATH (shutil.which wrapper; None when absent)."""
     return shutil.which(name)
+
+
+def find_executable_on_path(name: str, path_entries: Sequence[str]) -> str | None:
+    """Locate ``name`` in already-split PATH entries of an injected environment.
+
+    Unlike :func:`find_executable` this never consults the host process
+    environment, so collector tests simulating any target platform stay
+    deterministic regardless of the machine running them. The first entry
+    holding an executable ``name`` wins, matching PATH-resolution semantics.
+    """
+    for entry in path_entries:
+        if not entry:
+            continue
+        candidate = os.path.join(entry, name)
+        try:
+            if Path(candidate).is_file() and os.access(candidate, os.X_OK):
+                return candidate
+        except OSError:
+            continue
+    return None
 
 
 def is_cuda_related(path_entry: str) -> bool:

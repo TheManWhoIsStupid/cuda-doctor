@@ -11,6 +11,7 @@ from rich.console import Console
 from tests.factories import base_snapshot
 
 from cuda_doctor.core.enums import EnvironmentStatus, Severity
+from cuda_doctor.core.models import RuntimeLibraryCandidate, RuntimeLibraryInventory
 from cuda_doctor.diagnosis.engine import DiagnosisEngine
 from cuda_doctor.reporters import (
     SCHEMA_VERSION,
@@ -215,15 +216,44 @@ class TestJsonReporter:
             ld_library_path="/home/secretuser/.local/lib:/usr/lib",
             ld_library_path_entries=[(0, "/home/secretuser/.local/lib"), (1, "/usr/lib")],
         )
+        # The raw runtime-library inventory (v0.2 Phase 3) joins the same
+        # privacy class: internal state, never serialized into any report.
+        snapshot.runtime_libraries = RuntimeLibraryInventory(
+            candidates=[
+                RuntimeLibraryCandidate(
+                    family="libcudart",
+                    path="/home/secretuser/.local/lib/libcudart.so.12",
+                    version="12",
+                    origin="ld_library_path",
+                    search_order=0,
+                ),
+                RuntimeLibraryCandidate(
+                    family="libcudnn",
+                    path="/secret/diagnosis/libcudnn.so.9",
+                    soname="libcudnn.so.9",
+                    origin="ldconfig",
+                ),
+            ],
+            scan_errors={"/home/secretuser/.local/stale": "FileNotFoundError: gone"},
+        )
         payload = JsonReporter.build(inputs_for(snapshot))
         env = payload["environment"]["environment"]
         assert "path_entries" not in env
         assert "ld_library_path" not in env
         assert "ld_library_path_entries" not in env
-        assert ".npm-global" not in JsonReporter().render(inputs_for(snapshot))
+        assert "runtime_libraries" not in payload["environment"]
+        rendered = JsonReporter().render(inputs_for(snapshot))
+        assert ".npm-global" not in rendered
         # The ordered entries are popped before redaction, so neither the raw
         # path nor a "~"-prefixed reconstruction can leak.
-        assert ".local/lib" not in JsonReporter().render(inputs_for(snapshot))
+        assert ".local/lib" not in rendered
+        # Neither do inventory candidate paths, scan-error keys, family
+        # listings, or the LD_LIBRARY_PATH roots they would reconstruct.
+        assert "libcudart" not in rendered
+        assert "libcudnn" not in rendered
+        assert ".local/stale" not in rendered
+        assert "/secret/diagnosis" not in rendered
+        assert "ld_library_path" not in env
         # The CUDA-relevant subsets remain.
         assert "cuda_path_entries" in env
 

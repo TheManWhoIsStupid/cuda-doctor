@@ -74,3 +74,28 @@ class TestV02VariableRedaction:
         assert out["variables"]["CUDACXX"] == "~/toolkits/cuda/bin/nvcc"
         assert out["variables"]["CONDA_PREFIX"] == "~/miniconda3"
         assert out["variables"]["CUDA_VISIBLE_DEVICES"] == ""
+
+
+class TestRuntimeLibraryInventoryShapedRedaction:
+    """Defense in depth: were an inventory-shaped dict ever routed through
+    redaction (the snapshot excludes it earlier), home paths inside
+    candidates AND scan-error keys would still redact recursively."""
+
+    def test_candidate_paths_and_scan_error_keys_redact(self):
+        data = {
+            "runtime_libraries": {
+                "candidates": [
+                    {
+                        "family": "libcudart",
+                        "path": "/home/alice/.local/lib/libcudart.so.12",
+                        "canonical_path": "/home/alice/.local/lib/libcudart.so.12",
+                    }
+                ],
+                "scan_errors": {"/home/alice/.local/stale": "FileNotFoundError: gone"},
+            }
+        }
+        out = redact_value(data, home=HOME)
+        inventory = out["runtime_libraries"]
+        assert inventory["candidates"][0]["path"] == "~/.local/lib/libcudart.so.12"
+        assert inventory["candidates"][0]["canonical_path"] == "~/.local/lib/libcudart.so.12"
+        assert list(inventory["scan_errors"]) == ["~/.local/stale"]

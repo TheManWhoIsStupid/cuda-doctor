@@ -265,6 +265,10 @@ class EnvironmentSnapshot:
     cmake: ToolInfo | None = None
     ninja: ToolInfo | None = None
     environment: EnvironmentInfo = field(default_factory=EnvironmentInfo)
+    # Bounded runtime-library inventory (v0.2 D004 input). Internal
+    # diagnostic state: never serialized into reports — ``snapshot_to_dict``
+    # removes it exactly like the raw PATH / LD_LIBRARY_PATH state.
+    runtime_libraries: RuntimeLibraryInventory | None = None
     collection_errors: dict[str, str] = field(default_factory=dict)
     collected_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -283,10 +287,13 @@ def snapshot_to_dict(
     ``home`` (or the current home directory). With ``redact=False`` values are
     only normalized (enums to values, tuples to lists).
 
-    The full ``PATH``, raw ``LD_LIBRARY_PATH`` and the ordered
-    ``ld_library_path_entries`` are never included: reports must stay
-    shareable, so only the CUDA-relevant subsets analyzed in
-    ``cuda_path_entries`` / ``cuda_ld_library_entries`` are emitted.
+    The full ``PATH``, raw ``LD_LIBRARY_PATH``, the ordered
+    ``ld_library_path_entries``, and the raw ``runtime_libraries`` inventory
+    are never included: reports must stay shareable, so only the CUDA-relevant
+    subsets analyzed in ``cuda_path_entries`` / ``cuda_ld_library_entries``
+    are emitted. Any future user-visible D004 evidence is derived later by
+    the diagnosis layer from bounded, redacted facts — never from this raw
+    inventory.
     """
     data = asdict(snapshot)
     environment = data.get("environment")
@@ -294,6 +301,7 @@ def snapshot_to_dict(
         environment.pop("path_entries", None)
         environment.pop("ld_library_path", None)
         environment.pop("ld_library_path_entries", None)
+    data.pop("runtime_libraries", None)
     if redact:
         return redact_value(data, home=home)
     return redact_value(data, home="")

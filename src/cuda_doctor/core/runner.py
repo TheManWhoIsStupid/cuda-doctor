@@ -19,6 +19,10 @@ from cuda_doctor.collectors.gpu import GPUCollector
 from cuda_doctor.collectors.ninja import NinjaCollector
 from cuda_doctor.collectors.python_env import PythonEnvCollector
 from cuda_doctor.collectors.pytorch import PyTorchCollector
+from cuda_doctor.collectors.runtime_libraries import (
+    RuntimeLibraryCollector,
+    toolkit_library_roots,
+)
 from cuda_doctor.collectors.system import SystemCollector
 from cuda_doctor.core.enums import Platform
 from cuda_doctor.core.models import (
@@ -78,6 +82,16 @@ class CollectionRunner:
         environment = self._guarded(
             errors, "environment", lambda: EnvironmentCollector(self.env, self.platform).collect()
         )
+        runtime_libraries = self._guarded(
+            errors,
+            "runtime_libraries",
+            lambda: RuntimeLibraryCollector(
+                self.runner,
+                environment=environment,
+                platform=self.platform,
+                toolkit_roots=toolkit_library_roots(cuda),
+            ).collect(),
+        )
 
         snapshot = EnvironmentSnapshot(system=system or self._fallback_system())
         if gpu is not None:
@@ -98,6 +112,8 @@ class CollectionRunner:
             snapshot.ninja = ninja
         if environment is not None:
             snapshot.environment = environment
+        if runtime_libraries is not None:
+            snapshot.runtime_libraries = runtime_libraries
         snapshot.collection_errors = errors
         return snapshot
 

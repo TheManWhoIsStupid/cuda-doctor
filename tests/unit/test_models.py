@@ -152,6 +152,47 @@ class TestOrderedLdLibraryPathNeverSerialized:
         assert f"{HOME}/lib" not in str(data)
 
 
+class TestRuntimeLibrarySnapshotAttachment:
+    """v0.2 Phase 3: the inventory attaches additively, never serializes."""
+
+    def _snapshot_with_inventory(self) -> EnvironmentSnapshot:
+        snapshot = make_snapshot()
+        snapshot.runtime_libraries = RuntimeLibraryInventory(
+            candidates=[
+                RuntimeLibraryCandidate(
+                    family="libcudart",
+                    path=f"{HOME}/libs/libcudart.so.12",
+                    version="12",
+                    origin="ld_library_path",
+                    search_order=0,
+                )
+            ],
+            scan_errors={f"{HOME}/stale": "FileNotFoundError: stale"},
+        )
+        return snapshot
+
+    def test_inventory_defaults_to_none(self):
+        # Existing snapshots construct unchanged (additive field, safe default).
+        assert make_snapshot().runtime_libraries is None
+
+    def test_inventory_absent_from_snapshot_to_dict(self):
+        # MANDATORY privacy gate: the raw inventory must never appear in
+        # serialized snapshot output — excluded before recursive redaction.
+        data = snapshot_to_dict(self._snapshot_with_inventory(), home=HOME)
+        assert "runtime_libraries" not in data
+
+    def test_inventory_absent_even_without_redaction(self):
+        data = snapshot_to_dict(self._snapshot_with_inventory(), redact=False)
+        assert "runtime_libraries" not in data
+
+    def test_inventory_content_not_leaked_elsewhere(self):
+        data = snapshot_to_dict(self._snapshot_with_inventory(), home=HOME)
+        assert "libcudart" not in str(data)
+        assert "ld_library_path" not in str(data.get("environment", {}))
+        assert f"{HOME}/libs" not in str(data)
+        assert f"{HOME}/stale" not in str(data)
+
+
 class TestSelectorObservationSerialization:
     def test_selector_observation_fields_are_exactly_the_frozen_set(self):
         # Freeze guard (frozen architecture §9.1): the observation model

@@ -61,7 +61,6 @@ def make_diagnosis(**overrides) -> Diagnosis:
         "title": "Example diagnosis",
         "severity": Severity.WARNING,
         "confidence": Confidence.MEDIUM,
-        "role": DiagnosisRole.SECONDARY,
         "summary": "Example summary text.",
     }
     params.update(overrides)
@@ -74,8 +73,8 @@ def make_full_diagnosis() -> Diagnosis:
         title="Example conflict",
         severity=Severity.WARNING,
         confidence=Confidence.MEDIUM,
-        role=DiagnosisRole.PRIMARY,
         summary="Two selectors disagree.",
+        role=DiagnosisRole.PRIMARY,
         cause_class="selector_conflict",
         evidence=[EvidenceItem(key="cudacxx_version", value="12.4", source="CUDACXX")],
         impact=[ImpactItem(scope="extension_build", status="may compile against 12.4")],
@@ -208,6 +207,7 @@ class TestRemediationStep:
 class TestDiagnosisDefaults:
     def test_minimal_construction_safe_defaults(self):
         diagnosis = make_diagnosis()
+        assert diagnosis.role is None
         assert diagnosis.cause_class is None
         assert diagnosis.evidence == []
         assert diagnosis.impact == []
@@ -417,6 +417,58 @@ class TestDiagnosisCandidate:
         # Candidates are internal resolver inputs; the public result
         # carries concluded Diagnosis objects only.
         assert "candidates" not in {f.name for f in fields(DiagnosisResult)}
+
+
+class TestCandidateRoleSeparation:
+    """Maintainer review fix: rules must be able to construct candidates
+    without claiming a final report role — the resolver (Phase 10) owns
+    final role assignment. ``None`` is pre-resolver candidate state
+    only, never a fifth role."""
+
+    def test_candidate_constructible_without_final_role(self):
+        candidate = DiagnosisCandidate(
+            diagnosis=Diagnosis(
+                code="D00X",
+                title="Example diagnosis",
+                severity=Severity.WARNING,
+                confidence=Confidence.MEDIUM,
+                summary="Example summary text.",
+            )
+        )
+        assert candidate.diagnosis.role is None
+
+    def test_minimal_diagnosis_role_is_none(self):
+        assert make_diagnosis().role is None
+
+    def test_none_role_not_mutated_to_real_role(self):
+        diagnosis = make_diagnosis()
+        data = diagnosis.to_dict()
+        assert data["role"] is None
+        assert diagnosis.role is None  # serialization injects nothing
+
+    def test_no_placeholder_role_injected(self):
+        # Neither construction nor the candidate wrapper silently fills
+        # in POSSIBLE, SECONDARY, or any other real role.
+        diagnosis = make_diagnosis()
+        candidate = DiagnosisCandidate(diagnosis=diagnosis)
+        assert diagnosis.role is None
+        assert candidate.diagnosis.role is None
+
+    def test_explicit_final_role_survives_unchanged(self):
+        diagnosis = make_diagnosis(role=DiagnosisRole.PRIMARY)
+        assert diagnosis.to_dict()["role"] == "primary"
+        assert diagnosis.role is DiagnosisRole.PRIMARY
+
+    def test_role_enum_remains_exactly_four_members(self):
+        assert not hasattr(DiagnosisRole, "UNRESOLVED")
+        assert len(list(DiagnosisRole)) == 4
+
+    def test_no_resolver_behavior_introduced(self):
+        # The None -> concrete transition is resolver work (Phase 10):
+        # the models expose no assignment or finalization helper.
+        diagnosis = make_diagnosis()
+        for name in ("assign_role", "resolve_role", "finalize"):
+            assert not callable(getattr(diagnosis, name, None)), name
 
 
 class TestDiagnosisResultIntegration:

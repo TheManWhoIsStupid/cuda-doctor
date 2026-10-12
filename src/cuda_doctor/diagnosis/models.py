@@ -122,15 +122,20 @@ class Diagnosis:
     Carries the frozen diagnosis structure only. It has no policy
     properties or methods: no effective severity/confidence, no
     is-primary predicate, no ranking, no suppression behavior.
-    ``role`` is assigned by the resolver (later phase), never here.
+
+    ``role`` is ``None`` while a diagnosis is an internal pre-resolver
+    candidate: rules must not claim a final report role — that is the
+    resolver's exclusive job (Phase 10), which must guarantee every
+    finalized report diagnosis carries a concrete ``DiagnosisRole``.
+    ``None`` is not a fifth role and never reaches report output.
     """
 
     code: str
     title: str
     severity: Severity
     confidence: Confidence
-    role: DiagnosisRole
     summary: str
+    role: DiagnosisRole | None = None
     cause_class: str | None = None
     evidence: list[EvidenceItem] = field(default_factory=list)
     impact: list[ImpactItem] = field(default_factory=list)
@@ -154,9 +159,10 @@ class Diagnosis:
 class DiagnosisCandidate:
     """Internal resolver input: a diagnosis plus resolution-neutral hints.
 
-    Never serialized into reports. The resolver (later phase) consumes
-    candidates to assign final roles and relationships; the hints carry
-    no policy themselves.
+    Never serialized into reports. The carried ``Diagnosis`` is
+    constructed without a final role (``role=None``): the resolver
+    (later phase) consumes candidates to assign final roles and
+    relationships; the hints carry no policy themselves.
     """
 
     diagnosis: Diagnosis

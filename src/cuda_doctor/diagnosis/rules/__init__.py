@@ -7,5 +7,6 @@ roles, relationships, and engine wiring belong to later phases.
 
 from cuda_doctor.diagnosis.rules.base import DiagnosisRule
 from cuda_doctor.diagnosis.rules.d001 import D001ToolkitResolutionConflict
+from cuda_doctor.diagnosis.rules.d002 import D002TorchToolkitMismatch
 
-__all__ = ["D001ToolkitResolutionConflict", "DiagnosisRule"]
+__all__ = ["D001ToolkitResolutionConflict", "D002TorchToolkitMismatch", "DiagnosisRule"]

@@ -129,7 +129,7 @@ def _comparison(
     reliability cannot prove anything. Absence never implies mismatch;
     healthy wheel-only use without a local toolkit is not D002.
     """
-    if not torch.importable or torch.cuda_build is False or not torch.cuda_version:
+    if not torch.importable or torch.cuda_build is not True or not torch.cuda_version:
         return None
     if (
         reference_toolkit is None

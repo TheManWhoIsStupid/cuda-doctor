@@ -496,6 +496,69 @@ class TestNegativeNoDiagnosisRows:
         assert RULE.evaluate(facts, []) is None
 
 
+class TestCudaBuildPrecondition:
+    """Maintainer review follow-up: D002 requires an established CUDA
+    build context. UNKNOWN (``cuda_build=None``) is not one — even with
+    a known version string — while a confirmed CUDA build keeps emitting
+    regardless of the availability probe's outcome."""
+
+    def test_unknown_build_state_with_known_version_does_not_emit(self):
+        # Malformed/partial facts: importable, cuda_version present, but
+        # the build state itself is not established — no D002 even
+        # though the version would major-mismatch the reference.
+        facts = facts_with(
+            torch=torch_fact(cuda_build=None, cuda_version="12.4"),
+            reference=ref("NVCC", "11.8"),
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    @pytest.mark.parametrize(
+        ("torch_version", "toolkit_version"),
+        [("12.4", "11.8"), ("11.8", "12.4")],
+        ids=["torch-newer", "torch-older"],
+    )
+    def test_unknown_build_state_never_emits_in_either_direction(
+        self, torch_version, toolkit_version
+    ):
+        # A clear major mismatch in either direction stays
+        # no-diagnosis while cuda_build is UNKNOWN.
+        facts = facts_with(
+            torch=torch_fact(cuda_build=None, cuda_version=torch_version),
+            reference=ref("NVCC", toolkit_version),
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    def test_confirmed_cuda_build_still_emits(self):
+        facts = facts_with(
+            torch=torch_fact(cuda_build=True, cuda_version="12.4"),
+            reference=ref("NVCC", "11.8"),
+        )
+        candidate = RULE.evaluate(facts, [])
+        assert candidate is not None
+        assert candidate.diagnosis.confidence is Confidence.HIGH
+        assert candidate.diagnosis.severity is Severity.WARNING
+
+    @pytest.mark.parametrize("cuda_available", [True, False, None])
+    def test_cuda_available_irrelevant_once_build_confirmed(self, cuda_available):
+        # D002 is a build/toolchain diagnosis: once the CUDA build
+        # identity is established, the availability probe's outcome
+        # (True/False/None) never changes the decision or the output.
+        facts = facts_with(
+            torch=torch_fact(cuda_build=True, cuda_version="12.4", cuda_available=cuda_available),
+            reference=ref("NVCC", "11.8"),
+        )
+        candidate = RULE.evaluate(facts, [])
+        assert candidate is not None
+        baseline = RULE.evaluate(
+            facts_with(
+                torch=torch_fact(cuda_build=True, cuda_version="12.4", cuda_available=True),
+                reference=ref("NVCC", "11.8"),
+            ),
+            [],
+        )
+        assert candidate == baseline
+
+
 class TestUnknownConservativeRows:
     def test_unknown_torch_cuda_with_known_reference(self):
         facts = facts_with(

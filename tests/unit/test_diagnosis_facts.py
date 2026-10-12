@@ -20,6 +20,7 @@ from cuda_doctor.collectors.cuda import (
     VERSION_SOURCE_DIRECT,
 )
 from cuda_doctor.collectors.runtime_libraries import (
+    ORIGIN_CONDA_PREFIX,
     ORIGIN_LD_LIBRARY_PATH,
     ORIGIN_LDCONFIG,
     ORIGIN_PYTHON_PACKAGE,
@@ -44,7 +45,7 @@ from cuda_doctor.diagnosis.facts import (
     DiagnosisFactBuilder,
     DiagnosisFacts,
     IdentityReliability,
-    ModeledLibraryCandidate,
+    RuntimeLibraryCandidateFact,
     RuntimeLibraryFacts,
     ToolkitCompatibility,
     ToolkitSelectorFact,
@@ -345,12 +346,18 @@ class TestSelectorActivity:
 
 
 class TestUsrLocalCudaActivity:
+    """Maintainer review Fix 1: ``/usr/local/cuda`` participates only when
+    an active selector's captured resolution actually passed through its
+    path. Canonical-target equality alone is identity equivalence, NOT
+    path participation."""
+
     def test_present_but_untied_is_inactive(self):
         # D001-N14: /usr/local/cuda existing (even as a usable toolkit)
         # never makes it an active selector by itself.
         snapshot = snapshot_with_selectors(
             observation(
                 "usr_local_cuda",
+                raw_value="/usr/local/cuda",
                 canonical_root="/usr/local/cuda-12.4",
                 toolkit_version="12.4",
                 exists=True,
@@ -366,6 +373,7 @@ class TestUsrLocalCudaActivity:
         snapshot = snapshot_with_selectors(
             observation(
                 "usr_local_cuda",
+                raw_value="/usr/local/cuda",
                 canonical_root="/usr/local/cuda-13.0",
                 toolkit_version="13.0",
                 exists=False,
@@ -375,12 +383,13 @@ class TestUsrLocalCudaActivity:
         )
         assert selector_fact(build_facts(snapshot), "USR_LOCAL_CUDA").active is False
 
-    def test_tied_through_active_cuda_home(self):
-        # D001-P07: CUDA_HOME=/usr/local/cuda — the symlink resolution ties
-        # the incidental observation to the active selector.
+    def test_participates_through_active_cuda_home(self):
+        # D001-P07: CUDA_HOME=/usr/local/cuda — the raw value IS the
+        # symlink path, so resolution passed through it.
         snapshot = snapshot_with_selectors(
             observation(
                 "cuda_home",
+                raw_value="/usr/local/cuda",
                 canonical_root="/usr/local/cuda-12.4",
                 toolkit_version="12.4",
                 valid=True,
@@ -388,6 +397,7 @@ class TestUsrLocalCudaActivity:
             ),
             observation(
                 "usr_local_cuda",
+                raw_value="/usr/local/cuda",
                 canonical_root="/usr/local/cuda-12.4",
                 toolkit_version="12.4",
                 exists=True,
@@ -397,12 +407,43 @@ class TestUsrLocalCudaActivity:
         )
         assert selector_fact(build_facts(snapshot), "USR_LOCAL_CUDA").active is True
 
-    def test_tied_through_resolved_nvcc(self):
+    def test_same_canonical_target_alone_does_not_participate(self):
+        # The explicit Fix-1 regression: CUDA_HOME=/usr/local/cuda-12.4
+        # (direct target spelling) while /usr/local/cuda points at the
+        # same toolkit. Identity equivalence is NOT path participation.
+        snapshot = snapshot_with_selectors(
+            observation(
+                "cuda_home",
+                raw_value="/usr/local/cuda-12.4",
+                canonical_root="/usr/local/cuda-12.4",
+                toolkit_version="12.4",
+                valid=True,
+                version_source=VERSION_SOURCE_DIRECT,
+            ),
+            observation(
+                "usr_local_cuda",
+                raw_value="/usr/local/cuda",
+                canonical_root="/usr/local/cuda-12.4",
+                toolkit_version="12.4",
+                exists=True,
+                valid=True,
+                version_source=VERSION_SOURCE_DERIVED_WEAK,
+            ),
+        )
+        home = selector_fact(build_facts(snapshot), "CUDA_HOME")
+        usr_local = selector_fact(build_facts(snapshot), "USR_LOCAL_CUDA")
+        assert home.canonical_root == usr_local.canonical_root  # same target...
+        assert usr_local.active is False  # ...but no participation
+
+    def test_participates_through_resolved_nvcc(self):
         # D001-P08: nvcc resolved via /usr/local/cuda/bin/nvcc — the
-        # canonical root of the winning resolution ties the symlink.
+        # captured pre-canonical resolution passed through the symlink.
         snapshot = snapshot_with_selectors(
             observation(
                 "nvcc",
+                raw_value="nvcc",
+                resolved_path="/usr/local/cuda/bin/nvcc",
+                canonical_path="/usr/local/cuda-12.4/bin/nvcc",
                 canonical_root="/usr/local/cuda-12.4",
                 toolkit_version="12.4",
                 valid=True,
@@ -410,6 +451,7 @@ class TestUsrLocalCudaActivity:
             ),
             observation(
                 "usr_local_cuda",
+                raw_value="/usr/local/cuda",
                 canonical_root="/usr/local/cuda-12.4",
                 toolkit_version="12.4",
                 exists=True,
@@ -419,9 +461,139 @@ class TestUsrLocalCudaActivity:
         )
         assert selector_fact(build_facts(snapshot), "USR_LOCAL_CUDA").active is True
 
-    def test_equivalent_canonical_paths_count_as_same_target(self):
-        # Different raw spellings, same canonical root: the tie is on
-        # canonical identity, not on string equality of raw values.
+    def test_nvcc_resolved_directly_from_target_does_not_participate(self):
+        # Same canonical toolkit target as above, but resolution never
+        # touched /usr/local/cuda — must stay inactive.
+        snapshot = snapshot_with_selectors(
+            observation(
+                "nvcc",
+                raw_value="nvcc",
+                resolved_path="/usr/local/cuda-12.4/bin/nvcc",
+                canonical_path="/usr/local/cuda-12.4/bin/nvcc",
+                canonical_root="/usr/local/cuda-12.4",
+                toolkit_version="12.4",
+                valid=True,
+                version_source=VERSION_SOURCE_DIRECT,
+            ),
+            observation(
+                "usr_local_cuda",
+                raw_value="/usr/local/cuda",
+                canonical_root="/usr/local/cuda-12.4",
+                toolkit_version="12.4",
+                exists=True,
+                valid=True,
+                version_source=VERSION_SOURCE_DERIVED_WEAK,
+            ),
+        )
+        assert selector_fact(build_facts(snapshot), "USR_LOCAL_CUDA").active is False
+
+    def test_participates_through_path_like_cudacxx(self):
+        # CUDACXX=/usr/local/cuda/bin/nvcc: the raw value is used as-is,
+        # so the explicit compiler selection passed through the path.
+        snapshot = snapshot_with_selectors(
+            observation(
+                "cudacxx",
+                raw_value="/usr/local/cuda/bin/nvcc",
+                resolved_path="/usr/local/cuda/bin/nvcc",
+                canonical_path="/usr/local/cuda-12.4/bin/nvcc",
+                canonical_root="/usr/local/cuda-12.4",
+                toolkit_version="12.4",
+                valid=True,
+                version_source=VERSION_SOURCE_DIRECT,
+            ),
+            observation(
+                "usr_local_cuda",
+                raw_value="/usr/local/cuda",
+                canonical_root="/usr/local/cuda-12.4",
+                toolkit_version="12.4",
+                exists=True,
+                valid=True,
+                version_source=VERSION_SOURCE_DERIVED_WEAK,
+            ),
+        )
+        assert selector_fact(build_facts(snapshot), "USR_LOCAL_CUDA").active is True
+
+    def test_participates_through_winning_path_entry(self):
+        # path_cuda_bin's raw value is the winning PATH entry; an entry
+        # under /usr/local/cuda is actual path participation.
+        snapshot = snapshot_with_selectors(
+            observation(
+                "nvcc",
+                raw_value="nvcc",
+                resolved_path="/usr/local/cuda/bin/nvcc",
+                canonical_path="/usr/local/cuda-12.4/bin/nvcc",
+                canonical_root="/usr/local/cuda-12.4",
+                toolkit_version="12.4",
+                valid=True,
+                version_source=VERSION_SOURCE_DIRECT,
+            ),
+            observation(
+                "path_cuda_bin",
+                raw_value="/usr/local/cuda/bin",
+                resolved_path="/usr/local/cuda/bin/nvcc",
+                canonical_path="/usr/local/cuda-12.4/bin/nvcc",
+                canonical_root="/usr/local/cuda-12.4",
+                toolkit_version="12.4",
+                valid=True,
+                version_source=VERSION_SOURCE_DIRECT,
+            ),
+            observation(
+                "usr_local_cuda",
+                raw_value="/usr/local/cuda",
+                canonical_root="/usr/local/cuda-12.4",
+                toolkit_version="12.4",
+                exists=True,
+                valid=True,
+                version_source=VERSION_SOURCE_DERIVED_WEAK,
+            ),
+        )
+        assert selector_fact(build_facts(snapshot), "USR_LOCAL_CUDA").active is True
+
+    def test_canonical_resolution_located_under_usr_local_participates(self):
+        # A real (non-symlink) /usr/local/cuda directory: the canonical
+        # path itself lies under the anchor — resolution-wise passage.
+        snapshot = snapshot_with_selectors(
+            observation(
+                "nvcc",
+                raw_value="nvcc",
+                resolved_path="/opt/alias/bin/nvcc",
+                canonical_path="/usr/local/cuda/bin/nvcc",
+                canonical_root="/usr/local/cuda",
+                toolkit_version="12.4",
+                valid=True,
+                version_source=VERSION_SOURCE_DIRECT,
+            ),
+            observation(
+                "usr_local_cuda",
+                raw_value="/usr/local/cuda",
+                canonical_root="/usr/local/cuda",
+                toolkit_version="12.4",
+                exists=True,
+                valid=True,
+                version_source=VERSION_SOURCE_DERIVED_WEAK,
+            ),
+        )
+        assert selector_fact(build_facts(snapshot), "USR_LOCAL_CUDA").active is True
+
+    def test_component_boundary_not_a_prefix_match(self):
+        # /usr/local/cuda-12.4 and /usr/local/cuda_extra must NOT count as
+        # under /usr/local/cuda: participation is component-boundary based.
+        snapshot = snapshot_with_selectors(
+            observation(
+                "cuda_home",
+                raw_value="/usr/local/cuda-12.4",
+                canonical_root="/usr/local/cuda-12.4",
+                valid=True,
+            ),
+            observation(
+                "usr_local_cuda", raw_value="/usr/local/cuda", canonical_root="/usr/local/cuda-12.4"
+            ),
+        )
+        assert selector_fact(build_facts(snapshot), "USR_LOCAL_CUDA").active is False
+
+    def test_raw_spelling_variants_still_participate(self):
+        # Trailing (and repeated) separators in the captured raw value do
+        # not defeat the lexical participation test.
         snapshot = snapshot_with_selectors(
             observation(
                 "cuda_home",
@@ -432,31 +604,51 @@ class TestUsrLocalCudaActivity:
                 version_source=VERSION_SOURCE_DIRECT,
             ),
             observation(
-                "usr_local_cuda",
-                canonical_root="/usr/local/cuda-12.4",
-                toolkit_version="12.4",
-                exists=True,
-                valid=True,
-                version_source=VERSION_SOURCE_DERIVED_WEAK,
+                "usr_local_cuda", raw_value="/usr/local/cuda", canonical_root="/usr/local/cuda-12.4"
             ),
         )
         assert selector_fact(build_facts(snapshot), "USR_LOCAL_CUDA").active is True
 
-    def test_inactive_selector_does_not_tie(self):
+    def test_linux_cuda_path_cannot_activate_usr_local_cuda(self):
         # A Linux CUDA_PATH pointing at /usr/local/cuda is not active, so
-        # it must not activate the incidental observation either.
+        # it must not activate the incidental observation either — even
+        # though its raw value lexically passes through the path.
         snapshot = snapshot_with_selectors(
-            observation("cuda_path", canonical_root="/usr/local/cuda", valid=True),
-            observation("usr_local_cuda", canonical_root="/usr/local/cuda"),
+            observation(
+                "cuda_path",
+                raw_value="/usr/local/cuda",
+                canonical_root="/usr/local/cuda-12.4",
+                valid=True,
+            ),
+            observation(
+                "usr_local_cuda", raw_value="/usr/local/cuda", canonical_root="/usr/local/cuda-12.4"
+            ),
         )
         assert selector_fact(build_facts(snapshot), "USR_LOCAL_CUDA").active is False
 
-    def test_no_root_identity_means_no_tie(self):
+    def test_participation_requires_a_captured_path(self):
+        # No raw/resolved/canonical path anywhere: nothing proves passage.
         snapshot = snapshot_with_selectors(
-            observation("cuda_home", canonical_root=None, valid=True),
-            observation("usr_local_cuda", canonical_root=None),
+            observation("cuda_home", canonical_root="/usr/local/cuda-12.4", valid=True),
+            observation(
+                "usr_local_cuda", raw_value="/usr/local/cuda", canonical_root="/usr/local/cuda-12.4"
+            ),
         )
         assert selector_fact(build_facts(snapshot), "USR_LOCAL_CUDA").active is False
+
+    def test_participation_does_not_require_root_identity(self):
+        # CUDA_HOME=/usr/local/cuda whose canonicalization failed: the raw
+        # passage is captured evidence; root identity is not required.
+        snapshot = snapshot_with_selectors(
+            observation(
+                "cuda_home",
+                raw_value="/usr/local/cuda",
+                canonical_root=None,
+                valid=None,
+            ),
+            observation("usr_local_cuda", raw_value="/usr/local/cuda", canonical_root=None),
+        )
+        assert selector_fact(build_facts(snapshot), "USR_LOCAL_CUDA").active is True
 
 
 class TestToolkitIdentitySemantics:
@@ -1129,6 +1321,51 @@ class TestVisibilityFacts:
 
 
 class TestRuntimeLibraryFacts:
+    """Maintainer review Fix 2: candidate-level identity is preserved for
+    ALL bounded Phase-3 origins — D004 consumes facts, never the raw
+    inventory. Only LD_LIBRARY_PATH candidates carry a modeled order."""
+
+    def five_origin_inventory(self) -> RuntimeLibraryInventory:
+        """The maintainer-specified battery: one candidate per origin."""
+        return inventory(
+            library(
+                "libcudart",
+                "/ldp/libcudart.so.11",
+                version="11",
+                source=VERSION_SOURCE_FILENAME,
+                origin=ORIGIN_LD_LIBRARY_PATH,
+                search_order=0,
+            ),
+            library(
+                "libcudart",
+                "/site/nvidia/cuda_runtime/lib/libcudart.so.12",
+                version="12",
+                source=VERSION_SOURCE_FILENAME,
+                origin=ORIGIN_PYTHON_PACKAGE,
+            ),
+            library(
+                "libcudart",
+                "/toolkit/lib/libcudart.so.12",
+                version="12",
+                source=VERSION_SOURCE_FILENAME,
+                origin=ORIGIN_TOOLKIT,
+            ),
+            library(
+                "libcublas",
+                "/conda/lib/libcublas.so.12",
+                version="12",
+                source=VERSION_SOURCE_FILENAME,
+                origin=ORIGIN_CONDA_PREFIX,
+            ),
+            library(
+                "libcudnn",
+                "/ldconfig/lib/libcudnn.so.9",
+                version="9",
+                source=VERSION_SOURCE_FILENAME,
+                origin=ORIGIN_LDCONFIG,
+            ),
+        )
+
     def ldp_inventory(self) -> RuntimeLibraryInventory:
         return inventory(
             library(
@@ -1163,31 +1400,6 @@ class TestRuntimeLibraryFacts:
                 origin=ORIGIN_LD_LIBRARY_PATH,
                 search_order=0,
             ),
-            # Non-LDP origins never enter the modeled ordering.
-            library(
-                "libcudart",
-                "/usr/local/cuda-12.4/lib64/libcudart.so",
-                version="12",
-                source=VERSION_SOURCE_FILENAME,
-                origin=ORIGIN_TOOLKIT,
-                search_group="toolkit",
-            ),
-            library(
-                "libcudnn",
-                "/home/tester/venv/lib/python3.11/site-packages/nvidia/cudnn/lib/libcudnn.so.9",
-                version="9.1",
-                source=VERSION_SOURCE_FILENAME,
-                origin=ORIGIN_PYTHON_PACKAGE,
-                search_group="python-package",
-            ),
-            library(
-                "libcublas",
-                "/usr/lib/x86_64-linux-gnu/libcublas.so.12",
-                version="12",
-                source=VERSION_SOURCE_FILENAME,
-                origin=ORIGIN_LDCONFIG,
-                search_group="ldconfig",
-            ),
         )
 
     def snapshot_with_inventory(self, inv: RuntimeLibraryInventory) -> EnvironmentSnapshot:
@@ -1195,29 +1407,85 @@ class TestRuntimeLibraryFacts:
         snapshot.runtime_libraries = inv
         return snapshot
 
-    def test_modeled_candidates_only_ldp_with_order(self):
-        facts = build_facts(self.snapshot_with_inventory(self.ldp_inventory()))
-        modeled = facts.runtime_libraries.modeled_candidates
-        assert [(c.family, c.family_version, c.search_order) for c in modeled] == [
-            ("libcublas", "12", 0),
-            ("libcudart", "11", 0),
-            ("libcudnn", None, 0),
-            ("libcudart", "12", 1),
-        ]
-        assert all(isinstance(c, ModeledLibraryCandidate) for c in modeled)
-
-    def test_modeled_candidate_reliability(self):
-        facts = build_facts(self.snapshot_with_inventory(self.ldp_inventory()))
-        by_signature = {
-            (c.family, c.search_order): c for c in facts.runtime_libraries.modeled_candidates
+    def test_all_five_origins_retained_with_identities(self):
+        runtime = build_facts(
+            self.snapshot_with_inventory(self.five_origin_inventory())
+        ).runtime_libraries
+        by_origin = {candidate.origin: candidate for candidate in runtime.candidates}
+        assert set(by_origin) == {
+            ORIGIN_LD_LIBRARY_PATH,
+            ORIGIN_PYTHON_PACKAGE,
+            ORIGIN_TOOLKIT,
+            ORIGIN_CONDA_PREFIX,
+            ORIGIN_LDCONFIG,
         }
-        assert by_signature[("libcudart", 0)].reliability is IdentityReliability.DIRECT
-        assert by_signature[("libcublas", 0)].reliability is (
-            IdentityReliability.DERIVED_STRONG
-        )
-        assert by_signature[("libcudnn", 0)].reliability is IdentityReliability.UNKNOWN
+        # Family/version identities survive per origin — nothing is
+        # reduced to counts: package-local, toolkit, conda, and ldconfig
+        # versions are all preserved.
+        assert by_origin[ORIGIN_LD_LIBRARY_PATH].family_version == "11"
+        assert by_origin[ORIGIN_PYTHON_PACKAGE].family_version == "12"
+        assert by_origin[ORIGIN_TOOLKIT].family_version == "12"
+        assert by_origin[ORIGIN_CONDA_PREFIX].family_version == "12"
+        assert by_origin[ORIGIN_LDCONFIG].family_version == "9"
+        assert by_origin[ORIGIN_LDCONFIG].family == "libcudnn"
 
-    def test_ldp_candidate_without_order_is_not_modeled(self):
+    def test_candidate_field_set_exactly_the_minimal_shape(self):
+        assert {field.name for field in fields(RuntimeLibraryCandidateFact)} == {
+            "family",
+            "family_version",
+            "reliability",
+            "origin",
+            "modeled_search_order",
+        }
+
+    def test_only_ldp_carries_modeled_order(self):
+        runtime = build_facts(
+            self.snapshot_with_inventory(self.five_origin_inventory())
+        ).runtime_libraries
+        by_origin = {candidate.origin: candidate for candidate in runtime.candidates}
+        assert by_origin[ORIGIN_LD_LIBRARY_PATH].modeled_search_order == 0
+        for origin in (
+            ORIGIN_PYTHON_PACKAGE,
+            ORIGIN_TOOLKIT,
+            ORIGIN_CONDA_PREFIX,
+            ORIGIN_LDCONFIG,
+        ):
+            assert by_origin[origin].modeled_search_order is None, origin
+
+    def test_stray_non_ldp_order_is_never_promoted(self):
+        # Defensive: even a malformed inventory that stamps a search order
+        # onto a non-LDP candidate must not surface fake loader
+        # precedence — "candidate exists" stays "candidate exists".
+        inv = inventory(
+            library(
+                "libcudart",
+                "/toolkit/lib/libcudart.so.12",
+                version="12",
+                source=VERSION_SOURCE_FILENAME,
+                origin=ORIGIN_TOOLKIT,
+                search_order=7,
+            )
+        )
+        runtime = build_facts(self.snapshot_with_inventory(inv)).runtime_libraries
+        assert runtime.candidates[0].modeled_search_order is None
+
+    def test_ldp_ordering_preserved_across_candidates(self):
+        runtime = build_facts(
+            self.snapshot_with_inventory(self.ldp_inventory())
+        ).runtime_libraries
+        ldp_orders = [
+            (candidate.family, candidate.modeled_search_order)
+            for candidate in runtime.candidates
+            if candidate.origin == ORIGIN_LD_LIBRARY_PATH
+        ]
+        assert ldp_orders == [
+            ("libcublas", 0),
+            ("libcudart", 0),
+            ("libcudart", 1),
+            ("libcudnn", 0),
+        ]
+
+    def test_ldp_candidate_without_order_still_carried(self):
         inv = inventory(
             library(
                 "libcudart",
@@ -1229,41 +1497,84 @@ class TestRuntimeLibraryFacts:
             )
         )
         runtime = build_facts(self.snapshot_with_inventory(inv)).runtime_libraries
-        assert runtime.modeled_candidates == ()
+        assert len(runtime.candidates) == 1  # existence preserved...
+        assert runtime.candidates[0].modeled_search_order is None  # ...order not claimed
 
-    def test_family_counts_cover_all_origins(self):
-        facts = build_facts(self.snapshot_with_inventory(self.ldp_inventory()))
-        assert facts.runtime_libraries.family_counts == (
-            ("libcublas", 2),
-            ("libcudart", 3),
-            ("libcudnn", 2),
-        )
-
-    def test_observed_origins_and_package_local_families(self):
+    def test_candidate_reliability_mapping(self):
         runtime = build_facts(
             self.snapshot_with_inventory(self.ldp_inventory())
         ).runtime_libraries
-        assert runtime.observed_origins == frozenset(
-            {ORIGIN_LD_LIBRARY_PATH, ORIGIN_TOOLKIT, ORIGIN_PYTHON_PACKAGE, ORIGIN_LDCONFIG}
+        by_signature = {
+            (candidate.family, candidate.family_version): candidate.reliability
+            for candidate in runtime.candidates
+        }
+        assert by_signature[("libcudart", "11")] is IdentityReliability.DIRECT
+        assert by_signature[("libcublas", "12")] is IdentityReliability.DERIVED_STRONG
+        assert by_signature[("libcudnn", None)] is IdentityReliability.UNKNOWN
+
+    def test_candidate_ordering_deterministic(self):
+        first = build_facts(
+            self.snapshot_with_inventory(self.five_origin_inventory())
+        ).runtime_libraries
+        assert [
+            (candidate.family, candidate.origin) for candidate in first.candidates
+        ] == [
+            ("libcublas", ORIGIN_CONDA_PREFIX),
+            ("libcudart", ORIGIN_LD_LIBRARY_PATH),
+            ("libcudart", ORIGIN_PYTHON_PACKAGE),
+            ("libcudart", ORIGIN_TOOLKIT),
+            ("libcudnn", ORIGIN_LDCONFIG),
+        ]
+
+    def test_same_inventory_produces_equal_facts(self):
+        snapshot = self.snapshot_with_inventory(self.five_origin_inventory())
+        assert (
+            build_facts(snapshot).runtime_libraries
+            == build_facts(snapshot).runtime_libraries
         )
-        assert runtime.package_local_families == frozenset({"libcudnn"})
 
     def test_torch_runtime_family(self):
         runtime = build_facts(
-            self.snapshot_with_inventory(self.ldp_inventory())
+            self.snapshot_with_inventory(self.five_origin_inventory())
         ).runtime_libraries
         assert runtime.torch_runtime_family == "12"
 
     def test_torch_runtime_family_none_without_torch_cuda(self):
-        snapshot = self.snapshot_with_inventory(self.ldp_inventory())
+        snapshot = self.snapshot_with_inventory(self.five_origin_inventory())
         snapshot.pytorch = replace(snapshot.pytorch, cuda_version=None)
         runtime = build_facts(snapshot).runtime_libraries
         assert runtime.torch_runtime_family is None
 
+    def test_cudnn_independent_of_torch_cuda(self):
+        # cuDNN's baseline comes from environment-local candidates only;
+        # it is never derived from or numerically compared against
+        # torch.version.cuda (truth tables §19.10).
+        snapshot = self.snapshot_with_inventory(self.five_origin_inventory())
+        runtime = build_facts(snapshot).runtime_libraries
+        assert runtime.package_local_cudnn_family is None  # ldconfig cuDNN is not package-local
+        snapshot.pytorch = replace(snapshot.pytorch, cuda_version="11.8")
+        runtime = build_facts(snapshot).runtime_libraries
+        assert runtime.package_local_cudnn_family is None
+        assert runtime.torch_runtime_family == "11"
+
     def test_package_local_cudnn_baseline_single_family(self):
-        runtime = build_facts(
-            self.snapshot_with_inventory(self.ldp_inventory())
-        ).runtime_libraries
+        inv = inventory(
+            library(
+                "libcudnn",
+                "/site-a/nvidia/cudnn/lib/libcudnn.so.9",
+                version="9.1",
+                source=VERSION_SOURCE_FILENAME,
+                origin=ORIGIN_PYTHON_PACKAGE,
+            ),
+            library(
+                "libcudnn",
+                "/site-b/nvidia/cudnn/lib/libcudnn.so.9",
+                version="9.2",
+                source=VERSION_SOURCE_FILENAME,
+                origin=ORIGIN_PYTHON_PACKAGE,
+            ),
+        )
+        runtime = build_facts(self.snapshot_with_inventory(inv)).runtime_libraries
         assert runtime.package_local_cudnn_family == "9"
 
     def test_package_local_cudnn_baseline_ambiguous_is_none(self):
@@ -1308,25 +1619,22 @@ class TestRuntimeLibraryFacts:
 
     def test_scan_complete_without_errors(self):
         runtime = build_facts(
-            self.snapshot_with_inventory(self.ldp_inventory())
+            self.snapshot_with_inventory(self.five_origin_inventory())
         ).runtime_libraries
         assert runtime.scan_incomplete is False
 
     def test_missing_inventory_yields_empty_facts(self):
         runtime = build_facts(base_snapshot()).runtime_libraries
         assert runtime == RuntimeLibraryFacts(
-            modeled_candidates=(),
-            family_counts=(),
-            observed_origins=frozenset(),
-            package_local_families=frozenset(),
+            candidates=(),
             torch_runtime_family="12",
             package_local_cudnn_family=None,
             scan_incomplete=False,
         )
 
     def test_no_paths_or_scan_errors_carried(self):
-        # Privacy (§28): facts carry aggregates only — no library paths,
-        # no raw scan-error text.
+        # Privacy (§28): facts carry normalized identities only — no
+        # library paths, no raw scan-error text.
         inv = RuntimeLibraryInventory(
             candidates=[
                 library(
@@ -1345,6 +1653,21 @@ class TestRuntimeLibraryFacts:
         assert "secretuser" not in rendered
         assert "PermissionError" not in rendered
         assert "libcudart.so" not in rendered
+
+    def test_malformed_normalization_fallback_claims_incompleteness(self):
+        # Maintainer review Fix 3: a runtime-library normalization failure
+        # must degrade to the conservative state — incomplete/unknown —
+        # never to an apparent confidently complete scan. No exception
+        # details are exposed.
+        snapshot = base_snapshot()
+        snapshot.runtime_libraries = RuntimeLibraryInventory(candidates=None)
+        runtime = build_facts(snapshot).runtime_libraries
+        assert runtime.candidates == ()
+        assert runtime.scan_incomplete is True
+        assert runtime.torch_runtime_family is None
+        rendered = str(asdict(runtime))
+        assert "Error" not in rendered
+        assert "None" in rendered  # unknown-shaped, not fabricated content
 
 
 class TestIssueCodeProjection:
@@ -1454,11 +1777,12 @@ class TestPurityAndDeterminism:
             toolkit_version=None,
             reliability=IdentityReliability.UNKNOWN,
         )
-        modeled = ModeledLibraryCandidate(
+        modeled = RuntimeLibraryCandidateFact(
             family="libcudart",
             family_version=None,
             reliability=IdentityReliability.UNKNOWN,
-            search_order=0,
+            origin=ORIGIN_LD_LIBRARY_PATH,
+            modeled_search_order=0,
         )
         with pytest.raises(FrozenInstanceError):
             facts.platform = Platform.WINDOWS
@@ -1490,9 +1814,7 @@ class TestPurityAndDeterminism:
         facts = build_facts(base_snapshot())
         assert isinstance(facts.toolkit_selectors, tuple)
         assert isinstance(facts.issue_codes, frozenset)
-        assert isinstance(facts.runtime_libraries.modeled_candidates, tuple)
-        assert isinstance(facts.runtime_libraries.observed_origins, frozenset)
-        assert isinstance(facts.runtime_libraries.package_local_families, frozenset)
+        assert isinstance(facts.runtime_libraries.candidates, tuple)
 
     def test_malformed_selector_input_degrades_to_empty(self):
         # Architecture §20: one malformed fact degrades to its
@@ -1503,13 +1825,16 @@ class TestPurityAndDeterminism:
         assert facts.toolkit_selectors == ()
         assert facts.torch.importable is True  # other facts unaffected
 
-    def test_malformed_inventory_degrades_to_empty(self):
+    def test_malformed_inventory_degrades_conservatively(self):
+        # Fix 3: the degradation is UNKNOWN-shaped — empty candidates AND
+        # scan_incomplete=True (a failed normalization must never read as
+        # a confidently complete empty scan).
         snapshot = base_snapshot()
         snapshot.runtime_libraries = RuntimeLibraryInventory(candidates=None)
         runtime = build_facts(snapshot).runtime_libraries
-        assert runtime.modeled_candidates == ()
-        assert runtime.family_counts == ()
-        assert runtime.scan_incomplete is False
+        assert runtime.candidates == ()
+        assert runtime.scan_incomplete is True
+        assert build_facts(snapshot).torch.importable is True  # other facts unaffected
 
 
 class TestNormalizeOnlyBoundary:

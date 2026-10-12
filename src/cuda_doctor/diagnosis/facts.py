@@ -15,6 +15,9 @@ Guarantees (frozen architecture §12/§20):
 - toolkit identity separates installation identity from any conflict
   judgment: path inequality alone is never disagreement, and an unknown
   identity is never a mismatch;
+- ``/usr/local/cuda`` participates only through actual captured path
+  participation — pointing at the same canonical toolkit target is not
+  participation;
 - ``nvidia-smi``'s reported "CUDA Version" is never a toolkit selector;
 - the D002 compatibility adapter reuses ``interpret_torch_cuda`` instead
   of forking its semantics, and driver compatibility reuses
@@ -60,9 +63,9 @@ __all__ = [
     "DriverDiagnosisFacts",
     "GPUDiagnosisFacts",
     "IdentityReliability",
-    "ModeledLibraryCandidate",
     "PlatformApplicability",
     "ReferenceToolkit",
+    "RuntimeLibraryCandidateFact",
     "RuntimeLibraryFacts",
     "ToolkitCompatibility",
     "ToolkitSelectorFact",
@@ -169,8 +172,11 @@ class ToolkitSelectorFact:
     collector never sets it. ``explicit``/``effective`` distinguish the
     frozen selector classes; an incidental selector (``usr_local_cuda``)
     carries both as False and becomes active only when an active
-    selector's canonical resolution ties to it. ``valid`` keeps the
-    collector's tri-state shape. ``toolkit_version`` is normalized to
+    selector's captured resolution actually passed through its path
+    (raw_value/resolved_path/canonical_path, tested lexically with a
+    component boundary — never merely because another selector points at
+    the same canonical toolkit target). ``valid`` keeps the collector's
+    tri-state shape. ``toolkit_version`` is normalized to
     ``major.minor``; identity fields alone imply no conflict judgment.
     """
 
@@ -244,21 +250,27 @@ class VisibilityFacts:
 
 
 @dataclass(frozen=True)
-class ModeledLibraryCandidate:
-    """One runtime-library candidate inside the modeled ordering.
+class RuntimeLibraryCandidateFact:
+    """One normalized runtime-library candidate across the bounded origins.
 
-    Only candidates from ordered ``LD_LIBRARY_PATH`` entries carry a
-    ``search_order``; everything the loader model cannot establish
-    (RPATH, ld.so.cache precedence, ...) stays out of the facts.
-    ``family_version`` is the normalized comparable component (the
-    leading dotted component of the filename-derived version, e.g. ``12``
-    from ``libcudart.so.12``); ``None`` means the family is UNKNOWN.
+    Every Phase-3 bounded origin (ld_library_path, toolkit,
+    python_package, conda_prefix, ldconfig) preserves candidate-level
+    identity here so the D004 rule consumes facts, never the raw
+    inventory. ``modeled_search_order`` is carried ONLY for
+    ld_library_path candidates whose entry order the collector actually
+    established; every other origin keeps ``None`` — a candidate's
+    existence is never dressed up as loader precedence, and no global
+    cross-origin order is invented. ``family_version`` is the normalized
+    comparable component (the leading dotted component of the
+    filename-derived version, e.g. ``12`` from ``libcudart.so.12``);
+    ``None`` means the family is UNKNOWN. No raw library path is carried.
     """
 
     family: str
     family_version: str | None
     reliability: IdentityReliability
-    search_order: int
+    origin: str
+    modeled_search_order: int | None
 
 
 @dataclass(frozen=True)
@@ -267,19 +279,19 @@ class RuntimeLibraryFacts:
 
     Inventory facts only — no loader winner, conflict, or precedence
     beyond the explicitly modeled ``LD_LIBRARY_PATH`` ordering is decided
-    here. No library paths or scan-error text are carried: facts stay
-    bounded and shareable. ``torch_runtime_family`` is the torch CUDA
-    major family (the libcudart baseline; libcublas may use it only where
-    a candidate's own mapping is reliable). cuDNN uses its own
-    environment-local baseline (``package_local_cudnn_family``) and is
-    never compared against ``torch.version.cuda``. A ``None`` baseline
-    means UNKNOWN — not a conflict and not an all-clear.
+    here. ``candidates`` carries every normalized candidate from all
+    bounded origins (deterministically ordered); aggregates derivable
+    from it are deliberately not duplicated. ``torch_runtime_family`` is
+    the torch CUDA major family (the libcudart baseline; libcublas may
+    use it only where a candidate's own mapping is reliable). cuDNN uses
+    its own environment-local baseline (``package_local_cudnn_family``)
+    and is never compared against ``torch.version.cuda``. A ``None``
+    baseline means UNKNOWN — not a conflict and not an all-clear.
+    ``scan_incomplete`` is the bounded collection-failure indicator; no
+    library paths or scan-error text are ever carried.
     """
 
-    modeled_candidates: tuple[ModeledLibraryCandidate, ...]
-    family_counts: tuple[tuple[str, int], ...]
-    observed_origins: frozenset[str]
-    package_local_families: frozenset[str]
+    candidates: tuple[RuntimeLibraryCandidateFact, ...]
     torch_runtime_family: str | None
     package_local_cudnn_family: str | None
     scan_incomplete: bool
@@ -399,11 +411,12 @@ def _toolkit_selector_facts(snapshot: EnvironmentSnapshot) -> tuple[ToolkitSelec
     truth tables §16.11). Effective selectors (``nvcc``/``path_cuda_bin``)
     are active when observed: the collector only records the resolution
     that actually won. ``usr_local_cuda`` is active only when an active
-    selector's canonical root ties to it (semantics §20.4).
+    selector's captured resolution actually passed through its path
+    (semantics §20.4).
     """
     platform = snapshot.system.platform
-    facts: list[ToolkitSelectorFact] = []
-    usr_local_root: str | None = None
+    pairs: list[tuple[CUDASelectorObservation, ToolkitSelectorFact]] = []
+    usr_local_observation: CUDASelectorObservation | None = None
 
     for observation in snapshot.cuda.selector_observations:
         name = _SELECTOR_NAMES.get(observation.name, observation.name)
@@ -411,38 +424,80 @@ def _toolkit_selector_facts(snapshot: EnvironmentSnapshot) -> tuple[ToolkitSelec
         effective = name in _EFFECTIVE_SELECTORS
         active = _selector_is_active(name, platform, explicit, effective)
         if name == USR_LOCAL_CUDA:
-            usr_local_root = observation.canonical_root
+            usr_local_observation = observation
             active = False  # recomputed below once other selectors are known
         toolkit_version = _normalized_version(observation.toolkit_version)
-        facts.append(
-            ToolkitSelectorFact(
-                name=name,
-                explicit=explicit,
-                effective=effective,
-                active=active,
-                valid=observation.valid,
-                canonical_root=observation.canonical_root,
-                toolkit_version=toolkit_version,
-                reliability=_identity_reliability(observation, toolkit_version),
+        pairs.append(
+            (
+                observation,
+                ToolkitSelectorFact(
+                    name=name,
+                    explicit=explicit,
+                    effective=effective,
+                    active=active,
+                    valid=observation.valid,
+                    canonical_root=observation.canonical_root,
+                    toolkit_version=toolkit_version,
+                    reliability=_identity_reliability(observation, toolkit_version),
+                ),
             )
         )
 
-    if usr_local_root is not None:
-        # /usr/local/cuda participates only when an active selector's
-        # canonical resolution actually ties to it — never merely because
-        # the symlink exists (D001-N14). Equivalent canonical paths count
-        # as the same target regardless of the spelling used.
-        tied = any(
-            fact.name != USR_LOCAL_CUDA
-            and fact.active
-            and fact.canonical_root == usr_local_root
-            for fact in facts
-        )
-        facts = [
-            replace(fact, active=tied) if fact.name == USR_LOCAL_CUDA else fact
-            for fact in facts
+    if usr_local_observation is not None:
+        participates = _usr_local_participation(usr_local_observation, pairs)
+        pairs = [
+            (obs, replace(fact, active=participates))
+            if fact.name == USR_LOCAL_CUDA
+            else (obs, fact)
+            for obs, fact in pairs
         ]
-    return tuple(facts)
+    return tuple(fact for _, fact in pairs)
+
+
+def _usr_local_participation(
+    usr_local: CUDASelectorObservation,
+    pairs: Sequence[tuple[CUDASelectorObservation, ToolkitSelectorFact]],
+) -> bool:
+    """Whether ``/usr/local/cuda`` actually participated in resolution.
+
+    The frozen rule (truth tables §16.9/§20.4): the incidental
+    ``usr_local_cuda`` observation is active only when an *active*
+    selector's captured resolution passed through the ``/usr/local/cuda``
+    path. Canonical-root equality establishes toolkit identity
+    equivalence only — pointing at the same target through a different
+    path (e.g. ``CUDA_HOME=/usr/local/cuda-12.4``) is NOT participation.
+    The test is purely lexical over captured observation data
+    (``raw_value``/``resolved_path``/``canonical_path``); no host
+    filesystem access, no symlink re-resolution.
+    """
+    anchor = (usr_local.raw_value or "").rstrip("/")
+    if not anchor:
+        return False
+    for observation, fact in pairs:
+        if fact.name == USR_LOCAL_CUDA or not fact.active:
+            continue
+        captured_paths = (
+            observation.raw_value,
+            observation.resolved_path,
+            observation.canonical_path,
+        )
+        if any(_passes_through_path(captured, anchor) for captured in captured_paths):
+            return True
+    return False
+
+
+def _passes_through_path(path: str | None, anchor: str) -> bool:
+    """Pure lexical containment: ``path`` is ``anchor`` or lies under it.
+
+    Component-boundary comparison (``/usr/local/cuda-12.4`` is NOT under
+    ``/usr/local/cuda``); trailing separators are ignored; ``usr_local_cuda``
+    is a non-Windows observation, so POSIX separators are the right
+    vocabulary. No ``Path.resolve`` — the host is never consulted.
+    """
+    if not path:
+        return False
+    normalized = path.rstrip("/")
+    return normalized == anchor or normalized.startswith(anchor + "/")
 
 
 def _selector_is_active(
@@ -551,31 +606,41 @@ def _family_version(version: str | None) -> str | None:
 def _runtime_library_facts(
     inventory: RuntimeLibraryInventory | None, torch_facts: TorchDiagnosisFacts
 ) -> RuntimeLibraryFacts:
-    candidates = inventory.candidates if inventory is not None else []
+    raw_candidates = inventory.candidates if inventory is not None else []
 
-    modeled = sorted(
-        (
-            ModeledLibraryCandidate(
-                family=candidate.family,
-                family_version=_family_version(candidate.version),
-                reliability=_library_reliability(candidate.version_source),
-                search_order=candidate.search_order,
-            )
-            for candidate in candidates
-            if candidate.origin == ORIGIN_LD_LIBRARY_PATH
-            and candidate.search_order is not None
-        ),
-        key=lambda candidate: (
-            candidate.search_order,
-            candidate.family,
-            candidate.family_version or "",
-        ),
+    # All bounded origins keep candidate-level identity; only LDP
+    # candidates may carry the modeled search order — enforced here even
+    # against stray synthetic values, so "candidate exists" is never
+    # silently upgraded to "candidate has loader precedence N".
+    candidates = tuple(
+        sorted(
+            (
+                RuntimeLibraryCandidateFact(
+                    family=candidate.family,
+                    family_version=_family_version(candidate.version),
+                    reliability=_library_reliability(candidate.version_source),
+                    origin=candidate.origin,
+                    modeled_search_order=(
+                        candidate.search_order
+                        if candidate.origin == ORIGIN_LD_LIBRARY_PATH
+                        else None
+                    ),
+                )
+                for candidate in raw_candidates
+            ),
+            key=lambda fact: (
+                fact.family,
+                fact.origin,
+                fact.family_version or "",
+                fact.modeled_search_order is None,
+                fact.modeled_search_order or 0,
+            ),
+        )
     )
 
-    counts: dict[str, int] = {}
-    for candidate in candidates:
-        counts[candidate.family] = counts.get(candidate.family, 0) + 1
-    package_local = [c for c in candidates if c.origin == ORIGIN_PYTHON_PACKAGE]
+    package_local = [
+        c for c in raw_candidates if c.origin == ORIGIN_PYTHON_PACKAGE
+    ]
     cudnn_families = {
         _family_version(c.version) for c in package_local if c.family == "libcudnn"
     } - {None}
@@ -585,10 +650,7 @@ def _runtime_library_facts(
 
     torch_cuda = parse_cuda_version(torch_facts.cuda_version)
     return RuntimeLibraryFacts(
-        modeled_candidates=tuple(modeled),
-        family_counts=tuple(sorted(counts.items())),
-        observed_origins=frozenset(c.origin for c in candidates),
-        package_local_families=frozenset(c.family for c in package_local),
+        candidates=candidates,
         torch_runtime_family=str(torch_cuda.major) if torch_cuda is not None else None,
         package_local_cudnn_family=package_local_cudnn,
         scan_incomplete=bool(inventory.scan_errors) if inventory is not None else False,
@@ -706,13 +768,13 @@ class DiagnosisFactBuilder:
             runtime_libraries=_safe(
                 lambda: _runtime_library_facts(snapshot.runtime_libraries, torch_facts),
                 RuntimeLibraryFacts(
-                    modeled_candidates=(),
-                    family_counts=(),
-                    observed_origins=frozenset(),
-                    package_local_families=frozenset(),
+                    candidates=(),
                     torch_runtime_family=None,
                     package_local_cudnn_family=None,
-                    scan_incomplete=False,
+                    # Conservative fallback (UNKNOWN-over-false-certainty):
+                    # a normalization failure must never read as a
+                    # confidently complete scan. No exception details.
+                    scan_incomplete=True,
                 ),
             ),
             issue_codes=frozenset(issue.code for issue in issues),

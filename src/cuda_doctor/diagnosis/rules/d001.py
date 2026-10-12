@@ -81,7 +81,7 @@ class D001ToolkitResolutionConflict:
             role=None,
             evidence=_evidence(participating),
             impact=_impact(),
-            remediation=_remediation(facts.platform, participating),
+            remediation=_remediation(participating),
             verification=_verification(facts.platform),
         )
         # D001 explains a configuration risk, not an observed failure
@@ -191,32 +191,40 @@ def _impact() -> list[ImpactItem]:
     ]
 
 
-def _remediation(
-    platform: Platform, participating: Sequence[ToolkitSelectorFact]
-) -> list[RemediationStep]:
+def _remediation(participating: Sequence[ToolkitSelectorFact]) -> list[RemediationStep]:
     """Read-only SAFE guidance (truth tables §16.12, semantics §16-§18).
 
-    Steps are emitted per participating selector class so they stay tied
-    to observed evidence; the aim is always "make the active CUDA
-    development selectors agree", and removing installations is never
-    recommended. Nothing is executed.
+    D001 proves only that the active selectors disagree — it cannot know
+    which conflicting toolkit the user intends to keep. No toolkit
+    version or root is selected, synthesized, or hard-coded, so every
+    configuration-changing step carries ``command=None``: there is no
+    facts-supported concrete target value. Steps are emitted per
+    participating selector (evidence-tied and selector-specific — never
+    a CUDA_PATH instruction for a CUDA_HOME-only conflict); removing
+    installations is never recommended. Nothing is executed.
     """
     names = {fact.name for fact in participating}
-    if platform is Platform.WINDOWS:
-        return _windows_remediation(names)
-    return _linux_remediation(names)
-
-
-def _linux_remediation(names: set[str]) -> list[RemediationStep]:
-    """Linux guidance in POSIX shell syntax (architecture §40)."""
-    steps: list[RemediationStep] = []
+    steps: list[RemediationStep] = [
+        RemediationStep(
+            action=(
+                "Choose the CUDA toolkit you intend this shell/build "
+                "environment to use; the alignment steps below assume "
+                "that choice"
+            ),
+            why=(
+                "The active CUDA development selectors disagree about the "
+                "selected CUDA toolkit; the diagnosis cannot know which "
+                "toolkit you intend to keep"
+            ),
+            safety=RemediationSafety.SAFE,
+        )
+    ]
     if "CUDA_HOME" in names:
         steps.append(
             RemediationStep(
                 action=(
-                    "Temporarily align CUDA_HOME with the intended toolkit "
-                    "(for example: export CUDA_HOME=/usr/local/cuda-12.4) so "
-                    "the environment selector agrees with the other active "
+                    "Align CUDA_HOME to the intended toolkit so the "
+                    "environment selector agrees with the other active "
                     "selectors"
                 ),
                 why=(
@@ -226,16 +234,30 @@ def _linux_remediation(names: set[str]) -> list[RemediationStep]:
                     "components from an unintended toolkit"
                 ),
                 safety=RemediationSafety.SAFE,
-                command="export CUDA_HOME=/usr/local/cuda-12.4",
+            )
+        )
+    if "CUDA_PATH" in names:
+        steps.append(
+            RemediationStep(
+                action=(
+                    "Align CUDA_PATH to the intended toolkit so the "
+                    "environment selector agrees with the other active "
+                    "selectors"
+                ),
+                why=(
+                    "CUDA extension builds commonly use CUDA_PATH and nvcc "
+                    "to locate CUDA development components; a CUDA_PATH that "
+                    "resolves a different CUDA version makes them select "
+                    "components from an unintended toolkit"
+                ),
+                safety=RemediationSafety.SAFE,
             )
         )
     if "CUDACXX" in names:
         steps.append(
             RemediationStep(
                 action=(
-                    "Temporarily align CUDACXX with the intended toolkit's "
-                    "nvcc (for example: export "
-                    "CUDACXX=/usr/local/cuda-12.4/bin/nvcc) so the "
+                    "Align CUDACXX to the intended toolkit's nvcc so the "
                     "explicitly selected compiler agrees with the other "
                     "active selectors"
                 ),
@@ -245,17 +267,14 @@ def _linux_remediation(names: set[str]) -> list[RemediationStep]:
                     "version produces an inconsistent toolchain"
                 ),
                 safety=RemediationSafety.SAFE,
-                command="export CUDACXX=/usr/local/cuda-12.4/bin/nvcc",
             )
         )
     if "NVCC" in names or "PATH_CUDA_BIN" in names:
         steps.append(
             RemediationStep(
                 action=(
-                    "Temporarily adjust PATH so nvcc resolves from the "
-                    "intended toolkit (for example: export "
-                    "PATH=/usr/local/cuda-12.4/bin:$PATH), then open a "
-                    "fresh shell"
+                    "Adjust PATH so nvcc resolves from the intended "
+                    "toolkit, then open a fresh shell"
                 ),
                 why=(
                     "The PATH-resolved nvcc is an active selector; which "
@@ -263,69 +282,6 @@ def _linux_remediation(names: set[str]) -> list[RemediationStep]:
                     "shell picks up the adjusted environment"
                 ),
                 safety=RemediationSafety.SAFE,
-                command="export PATH=/usr/local/cuda-12.4/bin:$PATH",
-            )
-        )
-    return steps
-
-
-def _windows_remediation(names: set[str]) -> list[RemediationStep]:
-    """Windows guidance in cmd syntax (architecture §40)."""
-    root = "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.4"
-    steps: list[RemediationStep] = []
-    if "CUDA_HOME" in names or "CUDA_PATH" in names:
-        steps.append(
-            RemediationStep(
-                action=(
-                    "Temporarily align CUDA_PATH (or CUDA_HOME) with the "
-                    f"intended toolkit (for example: set \"CUDA_PATH={root}\")"
-                    " so the environment selector agrees with the other "
-                    "active selectors"
-                ),
-                why=(
-                    "CUDA extension builds commonly use CUDA_PATH/CUDA_HOME "
-                    "and nvcc to locate CUDA development components; an "
-                    "environment selector that resolves a different CUDA "
-                    "version makes them select components from an unintended "
-                    "toolkit"
-                ),
-                safety=RemediationSafety.SAFE,
-                command=f'set "CUDA_PATH={root}"',
-            )
-        )
-    if "CUDACXX" in names:
-        steps.append(
-            RemediationStep(
-                action=(
-                    "Temporarily align CUDACXX with the intended toolkit's "
-                    f"nvcc (for example: set \"CUDACXX={root}\\bin\\nvcc.exe\")"
-                    " so the explicitly selected compiler agrees with the "
-                    "other active selectors"
-                ),
-                why=(
-                    "Build systems honoring CUDACXX invoke the explicitly "
-                    "selected compiler; a CUDACXX from a different CUDA "
-                    "version produces an inconsistent toolchain"
-                ),
-                safety=RemediationSafety.SAFE,
-                command=f'set "CUDACXX={root}\\bin\\nvcc.exe"',
-            )
-        )
-    if "NVCC" in names or "PATH_CUDA_BIN" in names:
-        steps.append(
-            RemediationStep(
-                action=(
-                    "Temporarily adjust PATH so nvcc resolves from the "
-                    f"intended toolkit (for example: set \"PATH={root}\\bin;%PATH%\")"
-                    " and then open a fresh shell"
-                ),
-                why=(
-                    "The PATH-resolved nvcc is an active selector; which "
-                    "PATH entry wins determines its toolkit, and a fresh "
-                    "shell picks up the adjusted environment"
-                ),
-                safety=RemediationSafety.SAFE,
-                command=f'set "PATH={root}\\bin;%PATH%"',
             )
         )
     return steps

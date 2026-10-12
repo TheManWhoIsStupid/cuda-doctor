@@ -918,46 +918,103 @@ class TestCandidateOutputContent:
             ImpactItem(scope="PyTorch runtime", status="not automatically broken"),
         ]
 
-    def test_remediation_safe_actionable_and_linux_native(self):
+    def test_remediation_safe_guidance_without_commands(self):
+        # Maintainer review follow-up: D001 cannot know the intended
+        # toolkit, so configuration-changing steps carry no command —
+        # there is no facts-supported concrete target value.
         diagnosis = linux_conflict_candidate().diagnosis
         steps = diagnosis.remediation
-        assert 1 <= len(steps) <= 3
+        assert 2 <= len(steps) <= 5
         for step in steps:
             assert step.safety is RemediationSafety.SAFE
-            assert step.command is not None
-            assert step.command.startswith("export ")
-            assert "sudo" not in step.command
+            assert step.command is None
             assert step.why  # every step explains itself
         actions = " ".join(step.action for step in steps)
+        assert any("Choose" in step.action for step in steps)
         assert "CUDA_HOME" in actions
         assert "CUDACXX" not in actions  # CUDACXX is not participating here
         assert "intended toolkit" in actions
 
     def test_remediation_targets_each_participating_selector_class(self):
+        # Linux selector-specific guidance: every participating selector
+        # class gets its own alignment action, with no invented concrete
+        # target path.
         facts = facts_with(
             sel("CUDA_HOME", "11.8", canonical_root="/opt/cuda-a"),
             sel("CUDACXX", "12.1", canonical_root="/opt/cuda-b"),
             sel("NVCC", "12.4", canonical_root="/opt/cuda-c"),
         )
         steps = emitted_diagnosis(facts).remediation
-        commands = [step.command or "" for step in steps]
-        assert any("CUDA_HOME=" in command for command in commands)
-        assert any("CUDACXX=" in command for command in commands)
-        assert any("PATH=" in command for command in commands)
+        actions = [step.action for step in steps]
+        assert any("CUDA_HOME" in action for action in actions)
+        assert any("CUDACXX" in action for action in actions)
+        path_steps = [step for step in steps if "PATH" in step.action]
+        assert path_steps
+        assert any("nvcc" in step.action for step in path_steps)
+        for step in steps:  # no observed path becomes the suggested target
+            assert "/opt/cuda" not in f"{step.action} {step.why}"
 
-    def test_windows_remediation_uses_cmd_syntax(self):
+    def test_remediation_invents_no_toolkit_version(self):
+        # Maintainer review follow-up: with CUDA_HOME → 11.8 and NVCC →
+        # 12.1, the remediation must not contain 12.4 (or any other
+        # never-observed version) — and must promote neither conflicting
+        # version as the target.
+        facts = facts_with(
+            sel("CUDA_HOME", "11.8", canonical_root="/opt/cuda-11.8"),
+            sel("NVCC", "12.1", canonical_root="/opt/cuda-12.1"),
+        )
+        diagnosis = emitted_diagnosis(facts)
+        for step in diagnosis.remediation:
+            assert step.command is None
+            rendered = f"{step.action} {step.why}"
+            for forbidden in ("11.8", "12.1", "12.4", "v12.4", "cuda-12", "cuda-11"):
+                assert forbidden not in rendered, forbidden
+
+    def test_remediation_no_hardcoded_version_for_other_conflicts(self):
+        # A second arbitrary conflict (10.2 vs 13.0) stays free of any
+        # hard-coded 12.4/v12.4 target.
+        facts = facts_with(
+            sel("CUDA_HOME", "10.2", canonical_root="/opt/cuda-10.2"),
+            sel("CUDACXX", "13.0", canonical_root="/opt/cuda-13.0"),
+        )
+        for step in emitted_diagnosis(facts).remediation:
+            rendered = f"{step.action} {step.why}"
+            for forbidden in ("10.2", "13.0", "12.4", "v12.4"):
+                assert forbidden not in rendered, forbidden
+
+    def test_windows_cuda_home_only_conflict_references_cuda_home(self):
+        # Maintainer review follow-up: CUDA_HOME participates while
+        # CUDA_PATH does not — the remediation must speak to CUDA_HOME
+        # and must not pretend changing CUDA_PATH fixes it (Windows
+        # CUDA_HOME may take precedence over CUDA_PATH).
+        facts = facts_with(
+            sel("CUDA_HOME", "11.8", canonical_root="C:/toolkits/v11.8"),
+            sel("NVCC", "12.4", canonical_root="C:/toolkits/v12.4"),
+            platform=Platform.WINDOWS,
+        )
+        steps = emitted_diagnosis(facts).remediation
+        actions = " ".join(step.action for step in steps)
+        assert "CUDA_HOME" in actions
+        assert "CUDA_PATH" not in actions  # not participating
+        for step in steps:
+            assert step.safety is RemediationSafety.SAFE
+            assert step.command is None
+            assert "12.4" not in f"{step.action} {step.why}"
+
+    def test_windows_cuda_path_conflict_references_cuda_path(self):
+        # CUDA_PATH-specific guidance remains present when CUDA_PATH
+        # actually participates.
         facts = facts_with(
             sel("CUDA_PATH", "11.8", canonical_root="C:/toolkits/v11.8"),
             sel("NVCC", "12.4", canonical_root="C:/toolkits/v12.4"),
             platform=Platform.WINDOWS,
         )
         steps = emitted_diagnosis(facts).remediation
-        assert steps
+        actions = " ".join(step.action for step in steps)
+        assert "CUDA_PATH" in actions
+        assert "CUDA_HOME" not in actions  # not participating
         for step in steps:
-            assert step.safety is RemediationSafety.SAFE
-            assert step.command is not None
-            assert step.command.startswith("set ")
-            assert "export" not in step.command
+            assert step.command is None
 
     def test_no_removal_or_destructive_remediation(self):
         rendered = str(asdict(linux_conflict_candidate().diagnosis))

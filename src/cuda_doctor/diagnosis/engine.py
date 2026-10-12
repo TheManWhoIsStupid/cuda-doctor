@@ -11,6 +11,7 @@ from cuda_doctor.core.enums import Severity
 from cuda_doctor.core.exceptions import CompatibilityDataError
 from cuda_doctor.core.models import EnvironmentSnapshot
 from cuda_doctor.diagnosis.issue import Issue, Summary
+from cuda_doctor.diagnosis.models import Diagnosis
 
 _SEVERITY_ORDER = {
     Severity.CRITICAL: 0,
@@ -22,11 +23,19 @@ _SEVERITY_ORDER = {
 
 @dataclass
 class DiagnosisResult:
-    """Everything the engine concluded about one snapshot."""
+    """Everything the engine concluded about one snapshot.
+
+    v0.2 additive fields: ``diagnoses`` / ``diagnosis_errors`` default
+    empty, are not populated by the engine yet (later phases), and are
+    invisible to v0.1 reporters and CLI exit semantics. ``summary`` is
+    always derived from ``issues`` alone.
+    """
 
     issues: list[Issue] = field(default_factory=list)
+    diagnoses: list[Diagnosis] = field(default_factory=list)
     summary: Summary = field(default_factory=Summary)
     check_errors: dict[str, str] = field(default_factory=dict)
+    diagnosis_errors: dict[str, str] = field(default_factory=dict)
 
 
 class DiagnosisEngine:

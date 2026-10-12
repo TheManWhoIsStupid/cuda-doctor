@@ -165,7 +165,10 @@ class PyTorchInfo:
     # Bounded evidence that the direct CUDA availability probe raised
     # (same bounding style as ``import_error``); distinct from a mere
     # unknown/unavailable result. Never populated when torch is absent or
-    # fails to import — that is ``import_error``'s distinction.
+    # fails to import — that is ``import_error``'s distinction. Internal
+    # diagnostic state: ``snapshot_to_dict`` excludes it so the current
+    # public output shape gains no fields ahead of the reporter/schema
+    # phase.
     cuda_probe_error: str | None = None
     device_count: int | None = None
     cudnn_version: str | None = None
@@ -296,12 +299,14 @@ def snapshot_to_dict(
     only normalized (enums to values, tuples to lists).
 
     The full ``PATH``, raw ``LD_LIBRARY_PATH``, the ordered
-    ``ld_library_path_entries``, and the raw ``runtime_libraries`` inventory
-    are never included: reports must stay shareable, so only the CUDA-relevant
-    subsets analyzed in ``cuda_path_entries`` / ``cuda_ld_library_entries``
-    are emitted. Any future user-visible D004 evidence is derived later by
+    ``ld_library_path_entries``, the raw ``runtime_libraries`` inventory, and
+    the internal ``pytorch.cuda_probe_error`` observation are never included:
+    reports must stay shareable, so only the CUDA-relevant subsets analyzed
+    in ``cuda_path_entries`` / ``cuda_ld_library_entries`` are emitted, and
+    the public output shape must not gain fields ahead of the reporter/schema
+    phase. Any future user-visible D003/D004 evidence is derived later by
     the diagnosis layer from bounded, redacted facts — never from this raw
-    inventory.
+    state.
     """
     data = asdict(snapshot)
     environment = data.get("environment")
@@ -310,6 +315,13 @@ def snapshot_to_dict(
         environment.pop("ld_library_path", None)
         environment.pop("ld_library_path_entries", None)
     data.pop("runtime_libraries", None)
+    pytorch = data.get("pytorch")
+    if isinstance(pytorch, dict):
+        # Internal D003 evidence: the bounded direct-probe failure stays
+        # inside the snapshot until the reporter/schema phase decides its
+        # public shape. Only the serialized copy is touched — the
+        # PyTorchInfo object itself is never mutated.
+        pytorch.pop("cuda_probe_error", None)
     if redact:
         return redact_value(data, home=home)
     return redact_value(data, home="")

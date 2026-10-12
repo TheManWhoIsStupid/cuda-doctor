@@ -1170,6 +1170,22 @@ class TestCudaProbeErrorFacts:
         assert torch_facts.importable is False
         assert torch_facts.cuda_probe_error is None
 
+    def test_internal_retention_survives_serialization_exclusion(self):
+        # Pre-Phase-6 follow-up: the observation is excluded from public
+        # snapshot serialization, but the snapshot object and the built
+        # facts both still carry it verbatim for future D003 reasoning.
+        snapshot = base_snapshot()
+        snapshot.pytorch = replace(
+            snapshot.pytorch,
+            cuda_available=None,
+            cuda_probe_error="RuntimeError: /home/alice/private/path",
+        )
+        assert snapshot.pytorch.cuda_probe_error == "RuntimeError: /home/alice/private/path"
+        assert (
+            build_facts(snapshot).torch.cuda_probe_error
+            == "RuntimeError: /home/alice/private/path"
+        )
+
     def test_d003_sufficiency_four_states_mutually_distinguishable(self):
         # The required sufficiency proof: DiagnosisFacts alone separates
         # A (clean False), B (probe raised), C (unknown result, no

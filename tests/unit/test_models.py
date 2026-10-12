@@ -193,6 +193,73 @@ class TestRuntimeLibrarySnapshotAttachment:
         assert f"{HOME}/stale" not in str(data)
 
 
+class TestCudaProbeErrorSerialization:
+    """v0.2 pre-Phase-6 follow-up: the bounded probe-failure observation is
+    internal evidence for the future D003 cause — the public snapshot
+    serialization must not gain the field ahead of the reporter/schema
+    phase."""
+
+    PROBE_ERROR = "RuntimeError: /home/alice/private/path"
+
+    def _snapshot_with_probe_error(self) -> EnvironmentSnapshot:
+        snapshot = make_snapshot()
+        snapshot.pytorch = replace(
+            snapshot.pytorch,
+            installed=True,
+            is_cuda_build=True,
+            cuda_available=None,
+            cuda_probe_error=self.PROBE_ERROR,
+        )
+        return snapshot
+
+    def test_internal_observation_retained_on_snapshot(self):
+        # Excluding the field from serialization must never clear the
+        # internal observation itself.
+        snapshot = self._snapshot_with_probe_error()
+        assert snapshot.pytorch.cuda_probe_error == self.PROBE_ERROR
+
+    def test_probe_error_absent_from_snapshot_to_dict(self):
+        data = snapshot_to_dict(self._snapshot_with_probe_error(), home=HOME)
+        assert "cuda_probe_error" not in data["pytorch"]
+
+    def test_probe_error_absent_even_without_redaction(self):
+        # The exclusion happens before redaction: no configuration of
+        # snapshot_to_dict can emit the internal observation.
+        data = snapshot_to_dict(self._snapshot_with_probe_error(), redact=False)
+        assert "cuda_probe_error" not in data["pytorch"]
+
+    def test_probe_error_content_not_leaked_elsewhere(self):
+        data = snapshot_to_dict(self._snapshot_with_probe_error(), home=HOME)
+        assert self.PROBE_ERROR not in str(data)
+        assert "alice" not in str(data)
+
+    def test_serialized_pytorch_shape_is_exactly_v1(self):
+        # The v1 environment shape gains no keys: everything except the
+        # internal probe error stays, in the established field order.
+        data = snapshot_to_dict(self._snapshot_with_probe_error(), home=HOME)
+        assert list(data["pytorch"]) == [
+            "installed",
+            "version",
+            "cuda_version",
+            "is_cuda_build",
+            "cuda_available",
+            "device_count",
+            "cudnn_version",
+            "devices",
+            "import_error",
+        ]
+
+    def test_import_error_public_behavior_unchanged(self):
+        # The sibling bounded error string keeps its existing public place.
+        snapshot = self._snapshot_with_probe_error()
+        snapshot.pytorch = replace(
+            snapshot.pytorch, import_error="OSError: DLL load failed"
+        )
+        data = snapshot_to_dict(snapshot, home=HOME)
+        assert data["pytorch"]["import_error"] == "OSError: DLL load failed"
+        assert "cuda_probe_error" not in data["pytorch"]
+
+
 class TestSelectorObservationSerialization:
     def test_selector_observation_fields_are_exactly_the_frozen_set(self):
         # Freeze guard (frozen architecture §9.1): the observation model

@@ -266,6 +266,25 @@ class TestJsonReporter:
         assert "secretuser" not in rendered
         assert "<user>" in rendered or "~" in rendered
 
+    def test_internal_cuda_probe_error_never_serialized(self):
+        # v0.2 pre-Phase-6 follow-up: the bounded probe-failure observation
+        # is internal D003 evidence. JSON schema v1 must not gain the field
+        # — not even as null in a healthy environment — and the private
+        # path inside the captured error must not surface anywhere.
+        snapshot = base_snapshot()
+        snapshot.pytorch = replace(
+            snapshot.pytorch,
+            cuda_available=None,
+            cuda_probe_error="RuntimeError: /home/secretuser/private/path",
+        )
+        payload = JsonReporter.build(inputs_for(snapshot))
+        pytorch = payload["environment"]["pytorch"]
+        assert "cuda_probe_error" not in pytorch
+        assert "import_error" in pytorch  # sibling bounded error stays public
+        rendered = JsonReporter().render(inputs_for(snapshot))
+        assert "cuda_probe_error" not in rendered
+        assert "secretuser" not in rendered
+
 
 class TestMarkdownReporter:
     def test_document_structure(self):

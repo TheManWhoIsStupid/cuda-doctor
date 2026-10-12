@@ -1121,6 +1121,93 @@ class TestTorchFacts:
         assert build_facts(snapshot).torch.cuda_available is False
 
 
+class TestCudaProbeErrorFacts:
+    """Maintainer consistency Fix 3: the bounded direct-probe failure
+    evidence survives normalization so a later D003 cause can distinguish
+    "the probe raised" from "the result is unknown" — without reopening
+    PyTorchInfo."""
+
+    def test_probe_error_carried_verbatim(self):
+        snapshot = base_snapshot()
+        snapshot.pytorch = replace(
+            snapshot.pytorch,
+            cuda_available=None,
+            cuda_probe_error="RuntimeError: cudaErrorInsufficientDriver",
+        )
+        torch_facts = build_facts(snapshot).torch
+        assert torch_facts.cuda_available is None
+        assert torch_facts.cuda_probe_error == "RuntimeError: cudaErrorInsufficientDriver"
+
+    def test_absent_probe_error_preserved_as_none(self):
+        snapshot = base_snapshot()
+        snapshot.pytorch = replace(snapshot.pytorch, cuda_available=None)
+        torch_facts = build_facts(snapshot).torch
+        assert torch_facts.cuda_available is None
+        assert torch_facts.cuda_probe_error is None
+
+    def test_healthy_probe_has_no_error(self):
+        torch_facts = build_facts(base_snapshot()).torch
+        assert torch_facts.cuda_available is True
+        assert torch_facts.cuda_probe_error is None
+
+    def test_false_result_has_no_error(self):
+        # A clean False is a negative observation, not a probe failure.
+        snapshot = base_snapshot()
+        snapshot.pytorch = replace(snapshot.pytorch, cuda_available=False)
+        torch_facts = build_facts(snapshot).torch
+        assert torch_facts.cuda_available is False
+        assert torch_facts.cuda_probe_error is None
+
+    def test_import_failure_never_populates_probe_error(self):
+        snapshot = base_snapshot()
+        snapshot.pytorch = replace(
+            snapshot.pytorch,
+            installed=True,
+            import_error="OSError: libcuda.so not found",
+            cuda_probe_error=None,
+        )
+        torch_facts = build_facts(snapshot).torch
+        assert torch_facts.importable is False
+        assert torch_facts.cuda_probe_error is None
+
+    def test_d003_sufficiency_four_states_mutually_distinguishable(self):
+        # The required sufficiency proof: DiagnosisFacts alone separates
+        # A (clean False), B (probe raised), C (unknown result, no
+        # evidence), D (import failed). No D003 is emitted here — this is
+        # normalization, not diagnosis.
+        def state(**overrides) -> tuple:
+            snapshot = base_snapshot()
+            snapshot.pytorch = replace(snapshot.pytorch, **overrides)
+            torch_facts = build_facts(snapshot).torch
+            return (
+                torch_facts.importable,
+                torch_facts.cuda_build,
+                torch_facts.cuda_available,
+                torch_facts.cuda_probe_error,
+            )
+
+        a = state(cuda_available=False)  # GPU build, CUDA not usable, no probe error
+        b = state(cuda_available=None, cuda_probe_error="RuntimeError: no CUDA-capable device")
+        c = state(cuda_available=None)  # GPU build, genuinely unknown result
+        # D mirrors the collector's import-failure shape: it returns early,
+        # so every CUDA field stays unset.
+        d = state(
+            installed=True,
+            version=None,
+            cuda_version=None,
+            is_cuda_build=None,
+            cuda_available=None,
+            device_count=None,
+            devices=[],
+            import_error="OSError: DLL load failed",
+        )
+        assert a == (True, True, False, None)
+        assert b == (True, True, None, "RuntimeError: no CUDA-capable device")
+        assert c == (True, True, None, None)
+        assert d == (False, None, None, None)
+        assert len({a, b, c, d}) == 4  # all four states are distinct facts
+
+
 class TestGpuVisibility:
     def test_visible_with_gpus(self):
         assert build_facts(base_snapshot()).gpu.visible is Trinary.TRUE
@@ -1435,6 +1522,7 @@ class TestRuntimeLibraryFacts:
             "family_version",
             "reliability",
             "origin",
+            "active_toolkit",
             "modeled_search_order",
         }
 
@@ -1623,14 +1711,36 @@ class TestRuntimeLibraryFacts:
         ).runtime_libraries
         assert runtime.scan_incomplete is False
 
-    def test_missing_inventory_yields_empty_facts(self):
+    def test_missing_inventory_yields_empty_incomplete_facts(self):
+        # Maintainer consistency Fix 2: a None inventory means the runtime
+        # collector itself failed (runner-isolated) — an unobservable scan
+        # is incomplete, never an apparently-complete empty one.
         runtime = build_facts(base_snapshot()).runtime_libraries
         assert runtime == RuntimeLibraryFacts(
             candidates=(),
             torch_runtime_family="12",
             package_local_cudnn_family=None,
-            scan_incomplete=False,
+            scan_incomplete=True,
         )
+
+    def test_successful_empty_linux_inventory_is_complete(self):
+        snapshot = base_snapshot()
+        snapshot.runtime_libraries = inventory()
+        runtime = build_facts(snapshot).runtime_libraries
+        assert runtime.candidates == ()
+        assert runtime.scan_incomplete is False
+
+    def test_non_linux_not_applicable_inventory_is_not_an_error(self):
+        # The frozen platform gate: an empty inventory from a
+        # not-applicable platform is a complete non-error scan, and D004
+        # stays unevaluated there — distinct from collector failure.
+        snapshot = base_snapshot()
+        snapshot.system = replace(snapshot.system, platform=Platform.WINDOWS)
+        snapshot.runtime_libraries = inventory()
+        facts = build_facts(snapshot)
+        assert facts.runtime_libraries.candidates == ()
+        assert facts.runtime_libraries.scan_incomplete is False
+        assert facts.applicability.d004 is False
 
     def test_no_paths_or_scan_errors_carried(self):
         # Privacy (§28): facts carry normalized identities only — no
@@ -1668,6 +1778,339 @@ class TestRuntimeLibraryFacts:
         rendered = str(asdict(runtime))
         assert "Error" not in rendered
         assert "None" in rendered  # unknown-shaped, not fabricated content
+
+
+class TestToolkitCandidateAssociation:
+    """Maintainer consistency Fix 1: D004 must distinguish an active
+    toolkit's runtime-library candidates from incidental/discovered
+    installations using DiagnosisFacts alone (the collector stays neutral
+    — activity is derived here from normalized selector identities)."""
+
+    def snapshot_with(
+        self, selectors: list[CUDASelectorObservation], inv: RuntimeLibraryInventory
+    ) -> EnvironmentSnapshot:
+        snapshot = snapshot_with_selectors(*selectors)
+        snapshot.runtime_libraries = inv
+        return snapshot
+
+    def active_cuda_home(self, root: str = "/usr/local/cuda-12.4") -> CUDASelectorObservation:
+        return observation(
+            "cuda_home",
+            raw_value=root,
+            canonical_root=root,
+            toolkit_version="12.4",
+            valid=True,
+            version_source=VERSION_SOURCE_DIRECT,
+        )
+
+    def test_active_toolkit_candidate_is_true(self):
+        # Active CUDA 12.4 home; its lib64 candidate belongs to the active
+        # toolkit.
+        snapshot = self.snapshot_with(
+            [self.active_cuda_home()],
+            inventory(
+                library(
+                    "libcudart",
+                    "/usr/local/cuda-12.4/lib64/libcudart.so.12",
+                    version="12",
+                    source=VERSION_SOURCE_FILENAME,
+                    origin=ORIGIN_TOOLKIT,
+                )
+            ),
+        )
+        runtime = build_facts(snapshot).runtime_libraries
+        assert runtime.candidates[0].active_toolkit is Trinary.TRUE
+
+    def test_installed_but_unused_candidate_is_false(self):
+        # The required active-vs-incidental distinction: CUDA 11.8 is
+        # installed (a discovered toolkit root) while CUDA 12.4 is active.
+        snapshot = self.snapshot_with(
+            [self.active_cuda_home()],
+            inventory(
+                library(
+                    "libcudart",
+                    "/usr/local/cuda-11.8/lib64/libcudart.so.11",
+                    version="11",
+                    source=VERSION_SOURCE_FILENAME,
+                    origin=ORIGIN_TOOLKIT,
+                )
+            ),
+        )
+        runtime = build_facts(snapshot).runtime_libraries
+        assert runtime.candidates[0].active_toolkit is Trinary.FALSE
+
+    def test_both_candidates_distinguishable_in_one_inventory(self):
+        snapshot = self.snapshot_with(
+            [self.active_cuda_home()],
+            inventory(
+                library(
+                    "libcudart",
+                    "/usr/local/cuda-12.4/lib64/libcudart.so.12",
+                    version="12",
+                    source=VERSION_SOURCE_FILENAME,
+                    origin=ORIGIN_TOOLKIT,
+                ),
+                library(
+                    "libcudart",
+                    "/usr/local/cuda-11.8/lib64/libcudart.so.11",
+                    version="11",
+                    source=VERSION_SOURCE_FILENAME,
+                    origin=ORIGIN_TOOLKIT,
+                ),
+            ),
+        )
+        by_version = {
+            c.family_version: c.active_toolkit
+            for c in build_facts(snapshot).runtime_libraries.candidates
+        }
+        assert by_version == {"12": Trinary.TRUE, "11": Trinary.FALSE}
+
+    def test_non_toolkit_origins_are_unknown(self):
+        # The association is established only for toolkit-origin
+        # candidates; other origins keep UNKNOWN, never a fake TRUE/FALSE.
+        snapshot = self.snapshot_with(
+            [self.active_cuda_home()],
+            inventory(
+                library(
+                    "libcudart",
+                    "/usr/local/cuda-12.4/lib64/libcudart.so.12",
+                    version="12",
+                    source=VERSION_SOURCE_FILENAME,
+                    origin=ORIGIN_LD_LIBRARY_PATH,
+                    search_order=0,
+                ),
+                library(
+                    "libcudart",
+                    "/site/nvidia/cuda_runtime/lib/libcudart.so.12",
+                    version="12",
+                    source=VERSION_SOURCE_FILENAME,
+                    origin=ORIGIN_PYTHON_PACKAGE,
+                ),
+                library(
+                    "libcublas",
+                    "/conda/lib/libcublas.so.12",
+                    version="12",
+                    source=VERSION_SOURCE_FILENAME,
+                    origin=ORIGIN_CONDA_PREFIX,
+                ),
+                library(
+                    "libcudnn",
+                    "/ldconfig/lib/libcudnn.so.9",
+                    version="9",
+                    source=VERSION_SOURCE_FILENAME,
+                    origin=ORIGIN_LDCONFIG,
+                ),
+            ),
+        )
+        runtime = build_facts(snapshot).runtime_libraries
+        assert all(c.active_toolkit is Trinary.UNKNOWN for c in runtime.candidates)
+
+    def test_discovered_existence_alone_is_never_active(self):
+        # No selectors at all: nothing is active, so a discovered
+        # installation's candidate cannot belong to an active toolkit.
+        snapshot = self.snapshot_with(
+            [],
+            inventory(
+                library(
+                    "libcudart",
+                    "/usr/local/cuda-12.4/lib64/libcudart.so.12",
+                    version="12",
+                    source=VERSION_SOURCE_FILENAME,
+                    origin=ORIGIN_TOOLKIT,
+                )
+            ),
+        )
+        runtime = build_facts(snapshot).runtime_libraries
+        assert runtime.candidates[0].active_toolkit is Trinary.FALSE
+
+    def test_unresolvable_active_toolkit_is_unknown(self):
+        # An active wrapper CUDACXX carries no root identity: a toolkit is
+        # active but where its libraries live was never established, so
+        # the association is UNKNOWN — not FALSE.
+        snapshot = self.snapshot_with(
+            [
+                observation(
+                    "cudacxx",
+                    canonical_path="/usr/local/bin/nvcc-wrapper",
+                    canonical_root=None,
+                    toolkit_version="12.4",
+                    valid=True,
+                    version_source=VERSION_SOURCE_DIRECT,
+                )
+            ],
+            inventory(
+                library(
+                    "libcudart",
+                    "/usr/local/cuda-12.4/lib64/libcudart.so.12",
+                    version="12",
+                    source=VERSION_SOURCE_FILENAME,
+                    origin=ORIGIN_TOOLKIT,
+                )
+            ),
+        )
+        runtime = build_facts(snapshot).runtime_libraries
+        assert runtime.candidates[0].active_toolkit is Trinary.UNKNOWN
+
+    def test_rooted_and_unrooted_active_mix_stays_conservative(self):
+        # CUDA_HOME rooted + wrapper CUDACXX active: a candidate under the
+        # home is TRUE; one elsewhere may still belong to the wrapper's
+        # toolkit, so it degrades to UNKNOWN rather than FALSE.
+        snapshot = self.snapshot_with(
+            [
+                self.active_cuda_home(),
+                observation(
+                    "cudacxx",
+                    canonical_path="/usr/local/bin/nvcc-wrapper",
+                    canonical_root=None,
+                    valid=True,
+                ),
+            ],
+            inventory(
+                library(
+                    "libcudart",
+                    "/usr/local/cuda-12.4/lib64/libcudart.so.12",
+                    version="12",
+                    source=VERSION_SOURCE_FILENAME,
+                    origin=ORIGIN_TOOLKIT,
+                ),
+                library(
+                    "libcudart",
+                    "/opt/other-toolkit/lib64/libcudart.so.12",
+                    version="12",
+                    source=VERSION_SOURCE_FILENAME,
+                    origin=ORIGIN_TOOLKIT,
+                ),
+            ),
+        )
+        by_path_version = {
+            (c.family_version, c.active_toolkit)
+            for c in build_facts(snapshot).runtime_libraries.candidates
+        }
+        assert by_path_version == {("12", Trinary.TRUE), ("12", Trinary.UNKNOWN)}
+
+    def test_multiple_active_selectors_same_identity_no_contradiction(self):
+        # CUDA_HOME and an NVCC resolved under the same toolkit are both
+        # active and share the root: the candidate is TRUE once, with no
+        # contradictory association.
+        snapshot = self.snapshot_with(
+            [
+                self.active_cuda_home(),
+                observation(
+                    "nvcc",
+                    raw_value="nvcc",
+                    resolved_path="/usr/local/cuda-12.4/bin/nvcc",
+                    canonical_path="/usr/local/cuda-12.4/bin/nvcc",
+                    canonical_root="/usr/local/cuda-12.4",
+                    toolkit_version="12.4",
+                    valid=True,
+                    version_source=VERSION_SOURCE_DIRECT,
+                ),
+            ],
+            inventory(
+                library(
+                    "libcudart",
+                    "/usr/local/cuda-12.4/lib64/libcudart.so.12",
+                    version="12",
+                    source=VERSION_SOURCE_FILENAME,
+                    origin=ORIGIN_TOOLKIT,
+                )
+            ),
+        )
+        runtime = build_facts(snapshot).runtime_libraries
+        assert [c.active_toolkit for c in runtime.candidates] == [Trinary.TRUE]
+
+    def test_symlinked_root_associates_through_canonical_path(self):
+        # The toolkit scan may enter through a symlinked spelling; the
+        # candidate's canonical path ties it to the active resolved root
+        # even though the lexical path differs.
+        snapshot = self.snapshot_with(
+            [
+                observation(
+                    "cuda_home",
+                    raw_value="/usr/local/cuda",
+                    canonical_root="/usr/local/cuda-12.4",
+                    toolkit_version="12.4",
+                    valid=True,
+                    version_source=VERSION_SOURCE_DIRECT,
+                )
+            ],
+            inventory(
+                library(
+                    "libcudart",
+                    "/usr/local/cuda-12.4/lib64/libcudart.so.12",
+                    version="12",
+                    source=VERSION_SOURCE_FILENAME,
+                    origin=ORIGIN_TOOLKIT,
+                    canonical_path="/usr/local/cuda-12.4/lib64/libcudart.so.12",
+                )
+            ),
+        )
+        runtime = build_facts(snapshot).runtime_libraries
+        assert runtime.candidates[0].active_toolkit is Trinary.TRUE
+
+    def test_component_boundary_respected_for_association(self):
+        # /usr/local/cuda-12.4-extra is not under the active root.
+        snapshot = self.snapshot_with(
+            [self.active_cuda_home()],
+            inventory(
+                library(
+                    "libcudart",
+                    "/usr/local/cuda-12.4-extra/lib64/libcudart.so.12",
+                    version="12",
+                    source=VERSION_SOURCE_FILENAME,
+                    origin=ORIGIN_TOOLKIT,
+                )
+            ),
+        )
+        runtime = build_facts(snapshot).runtime_libraries
+        assert runtime.candidates[0].active_toolkit is Trinary.FALSE
+
+    def test_inactive_selector_does_not_associate(self):
+        # A Linux CUDA_PATH is never active, so its root cannot make a
+        # candidate active — accepted selector semantics are unchanged.
+        snapshot = self.snapshot_with(
+            [
+                observation(
+                    "cuda_path",
+                    raw_value="/opt/cuda-12.6",
+                    canonical_root="/opt/cuda-12.6",
+                    toolkit_version="12.6",
+                    valid=True,
+                    version_source=VERSION_SOURCE_DIRECT,
+                )
+            ],
+            inventory(
+                library(
+                    "libcudart",
+                    "/opt/cuda-12.6/lib64/libcudart.so.12",
+                    version="12",
+                    source=VERSION_SOURCE_FILENAME,
+                    origin=ORIGIN_TOOLKIT,
+                )
+            ),
+        )
+        runtime = build_facts(snapshot).runtime_libraries
+        assert runtime.candidates[0].active_toolkit is Trinary.FALSE
+
+    def test_no_raw_paths_leak_through_association(self):
+        # The association uses the candidate path internally only: the
+        # normalized fact carries the Trinary, never the path.
+        snapshot = self.snapshot_with(
+            [self.active_cuda_home()],
+            inventory(
+                library(
+                    "libcudart",
+                    "/home/secretuser/toolkits/cuda-12.4/lib64/libcudart.so.12",
+                    version="12",
+                    source=VERSION_SOURCE_FILENAME,
+                    origin=ORIGIN_TOOLKIT,
+                )
+            ),
+        )
+        rendered = str(asdict(build_facts(snapshot).runtime_libraries))
+        assert "secretuser" in str(snapshot.runtime_libraries.candidates[0].path)
+        assert "secretuser" not in rendered
+        assert "cuda-12.4/lib64" not in rendered
 
 
 class TestIssueCodeProjection:
@@ -1782,6 +2225,7 @@ class TestPurityAndDeterminism:
             family_version=None,
             reliability=IdentityReliability.UNKNOWN,
             origin=ORIGIN_LD_LIBRARY_PATH,
+            active_toolkit=Trinary.UNKNOWN,
             modeled_search_order=0,
         )
         with pytest.raises(FrozenInstanceError):

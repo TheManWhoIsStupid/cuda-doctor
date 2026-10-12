@@ -50,7 +50,15 @@ class PyTorchCollector:
         info.version = _safe(lambda: torch.__version__)
         info.cuda_version = _safe(lambda: torch.version.cuda)
         info.is_cuda_build = info.cuda_version is not None
-        info.cuda_available = _safe(lambda: torch.cuda.is_available())
+        try:
+            info.cuda_available = torch.cuda.is_available()
+        except Exception as exc:
+            # A raising probe is direct runtime-initialization failure
+            # evidence — not the same thing as an unknown result, so the
+            # bounded exception is preserved separately (bounded like
+            # ``import_error``; no stack dumps, no environment details).
+            info.cuda_available = None
+            info.cuda_probe_error = f"{type(exc).__name__}: {exc}"[:300]
         if info.cuda_available:
             count = _safe(lambda: torch.cuda.device_count())
             info.device_count = count if isinstance(count, int) else None

@@ -18,6 +18,12 @@ Guarantees (frozen architecture §12/§20):
 - ``/usr/local/cuda`` participates only through actual captured path
   participation — pointing at the same canonical toolkit target is not
   participation;
+- toolkit-origin runtime candidates carry a bounded active-toolkit
+  association derived from already-normalized active selector identities
+  (never re-observed by the collector), and an absent/failed runtime
+  inventory normalizes to an incomplete scan, never an empty complete one;
+- a direct ``torch.cuda.is_available()`` probe failure is preserved as its
+  own bounded fact, distinct from an unknown probe result;
 - ``nvidia-smi``'s reported "CUDA Version" is never a toolkit selector;
 - the D002 compatibility adapter reuses ``interpret_torch_cuda`` instead
   of forking its semantics, and driver compatibility reuses
@@ -39,6 +45,7 @@ from cuda_doctor.collectors.cuda import (
 from cuda_doctor.collectors.runtime_libraries import (
     ORIGIN_LD_LIBRARY_PATH,
     ORIGIN_PYTHON_PACKAGE,
+    ORIGIN_TOOLKIT,
     VERSION_SOURCE_FILENAME,
     VERSION_SOURCE_SYMLINK_TARGET,
 )
@@ -47,6 +54,7 @@ from cuda_doctor.core.enums import Platform
 from cuda_doctor.core.models import (
     CUDASelectorObservation,
     EnvironmentSnapshot,
+    RuntimeLibraryCandidate,
     RuntimeLibraryInventory,
 )
 from cuda_doctor.diagnosis.issue import Issue
@@ -198,13 +206,21 @@ class TorchDiagnosisFacts:
     is the frozen "probe produced no reliable boolean" contract, distinct
     from ``False``. ``cuda_build`` distinguishes a CPU-only build
     (``False``) from a CUDA build whose availability is unknown
-    (``True`` with ``cuda_available=None``).
+    (``True`` with ``cuda_available=None``). ``cuda_probe_error`` preserves
+    the bounded direct-probe failure evidence: ``cuda_available=None`` with
+    a probe error means the ``torch.cuda.is_available()`` call itself
+    raised (runtime initialization failure evidence), while ``None``
+    without an error is a genuinely unknown/unavailable result. Import
+    failure remains a separate fact (``importable=False``) and never
+    populates the probe error. No classification into any diagnosis cause
+    happens here.
     """
 
     importable: bool
     cuda_build: bool | None
     cuda_version: str | None
     cuda_available: bool | None
+    cuda_probe_error: str | None
     cudnn_version: str | None
 
 
@@ -264,12 +280,26 @@ class RuntimeLibraryCandidateFact:
     comparable component (the leading dotted component of the
     filename-derived version, e.g. ``12`` from ``libcudart.so.12``);
     ``None`` means the family is UNKNOWN. No raw library path is carried.
+
+    ``active_toolkit`` is the bounded association fact for D004's
+    active-toolkit reasoning: whether a ``toolkit``-origin candidate
+    belongs to an active toolkit identity. It is derived here from
+    already-normalized active selector identities and the candidate's
+    captured paths (used internally only, never exposed) — the collector
+    never decides activity. ``TRUE`` means the candidate lies under an
+    active selector's canonical root; ``FALSE`` means it provably belongs
+    to no active identity (an installed-but-unused discovered
+    installation; existence alone is never activity); ``UNKNOWN`` means
+    the association cannot be established reliably (some active toolkit
+    whose root is unresolvable) or the origin is not ``toolkit``, for
+    which this association is not an established observation.
     """
 
     family: str
     family_version: str | None
     reliability: IdentityReliability
     origin: str
+    active_toolkit: Trinary
     modeled_search_order: int | None
 
 
@@ -287,7 +317,10 @@ class RuntimeLibraryFacts:
     its own environment-local baseline (``package_local_cudnn_family``)
     and is never compared against ``torch.version.cuda``. A ``None``
     baseline means UNKNOWN — not a conflict and not an all-clear.
-    ``scan_incomplete`` is the bounded collection-failure indicator; no
+    ``scan_incomplete`` is the bounded collection-failure indicator:
+    ``True`` for per-root scan errors, for a failed collector (a ``None``
+    inventory), and for a failed normalization — never for a successful
+    empty scan or a not-applicable platform's empty inventory. No
     library paths or scan-error text are ever carried.
     """
 
@@ -517,6 +550,7 @@ def _torch_facts(snapshot: EnvironmentSnapshot) -> TorchDiagnosisFacts:
         cuda_build=info.is_cuda_build,
         cuda_version=info.cuda_version,
         cuda_available=info.cuda_available,
+        cuda_probe_error=info.cuda_probe_error,
         cudnn_version=info.cudnn_version,
     )
 
@@ -603,8 +637,48 @@ def _family_version(version: str | None) -> str | None:
     return version.split(".")[0]
 
 
+def _toolkit_association(
+    candidate: RuntimeLibraryCandidate,
+    selectors: Sequence[ToolkitSelectorFact],
+) -> Trinary:
+    """Whether a ``toolkit``-origin candidate belongs to an active toolkit.
+
+    Derived purely from already-normalized selector facts plus the
+    candidate's captured paths (used internally, never exposed): ``TRUE``
+    when the candidate's observed or canonical path lies under an active
+    selector's canonical root; ``FALSE`` when active identities exist and
+    the candidate is provably under none of them (or nothing is active —
+    a discovered installation's existence alone is never activity);
+    ``UNKNOWN`` when any active toolkit's root identity is unresolvable
+    (its libraries' location was never established, so membership cannot
+    be ruled out), or the origin is not ``toolkit`` (association is not
+    an established observation for the other origins). Multiple active
+    selectors reaching the same toolkit cannot contradict: the test is a
+    set membership over active roots.
+    """
+    if candidate.origin != ORIGIN_TOOLKIT:
+        return Trinary.UNKNOWN
+    active_facts = [fact for fact in selectors if fact.active]
+    active_roots = [fact.canonical_root for fact in active_facts if fact.canonical_root]
+    for root in active_roots:
+        if _passes_through_path(candidate.path, root) or _passes_through_path(
+            candidate.canonical_path, root
+        ):
+            return Trinary.TRUE
+    if not active_facts:
+        return Trinary.FALSE  # no active toolkit exists to belong to
+    if len(active_roots) < len(active_facts):
+        # Some active toolkit's location was never established (e.g. a
+        # wrapper CUDACXX with no root identity): the candidate may still
+        # belong to it, so FALSE would be over-certain — UNKNOWN.
+        return Trinary.UNKNOWN
+    return Trinary.FALSE
+
+
 def _runtime_library_facts(
-    inventory: RuntimeLibraryInventory | None, torch_facts: TorchDiagnosisFacts
+    inventory: RuntimeLibraryInventory | None,
+    torch_facts: TorchDiagnosisFacts,
+    selectors: Sequence[ToolkitSelectorFact],
 ) -> RuntimeLibraryFacts:
     raw_candidates = inventory.candidates if inventory is not None else []
 
@@ -620,6 +694,7 @@ def _runtime_library_facts(
                     family_version=_family_version(candidate.version),
                     reliability=_library_reliability(candidate.version_source),
                     origin=candidate.origin,
+                    active_toolkit=_toolkit_association(candidate, selectors),
                     modeled_search_order=(
                         candidate.search_order
                         if candidate.origin == ORIGIN_LD_LIBRARY_PATH
@@ -649,11 +724,17 @@ def _runtime_library_facts(
     package_local_cudnn = next(iter(cudnn_families)) if len(cudnn_families) == 1 else None
 
     torch_cuda = parse_cuda_version(torch_facts.cuda_version)
+    # A None inventory means the collector itself failed (the runner
+    # isolates it and records a collection error): an unobservable scan
+    # is incomplete, never an apparently-complete empty one. An empty
+    # inventory from a successful (or not-applicable) collection is a
+    # complete scan — those stay distinct.
+    scan_incomplete = True if inventory is None else bool(inventory.scan_errors)
     return RuntimeLibraryFacts(
         candidates=candidates,
         torch_runtime_family=str(torch_cuda.major) if torch_cuda is not None else None,
         package_local_cudnn_family=package_local_cudnn,
-        scan_incomplete=bool(inventory.scan_errors) if inventory is not None else False,
+        scan_incomplete=scan_incomplete,
     )
 
 
@@ -738,6 +819,7 @@ class DiagnosisFactBuilder:
                 cuda_build=None,
                 cuda_version=None,
                 cuda_available=None,
+                cuda_probe_error=None,
                 cudnn_version=None,
             ),
         )
@@ -766,7 +848,9 @@ class DiagnosisFactBuilder:
                 ),
             ),
             runtime_libraries=_safe(
-                lambda: _runtime_library_facts(snapshot.runtime_libraries, torch_facts),
+                lambda: _runtime_library_facts(
+                    snapshot.runtime_libraries, torch_facts, selectors
+                ),
                 RuntimeLibraryFacts(
                     candidates=(),
                     torch_runtime_family=None,

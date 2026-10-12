@@ -743,14 +743,24 @@ class TestSelectorVersionSourceVocabulary:
         assert VERSION_SOURCE_UNKNOWN in sources
 
 
-def _fake_torch(cuda: str | None, available: bool = True, devices: int = 1):
+def _fake_torch(
+    cuda: str | None,
+    available: bool = True,
+    devices: int = 1,
+    probe_error: Exception | None = None,
+):
+    def is_available():
+        if probe_error is not None:
+            raise probe_error
+        return available
+
     def import_torch(name):
         assert name == "torch"
         return types.SimpleNamespace(
             __version__="2.4.0+cu121",
             version=types.SimpleNamespace(cuda=cuda),
             cuda=types.SimpleNamespace(
-                is_available=lambda: available,
+                is_available=is_available,
                 device_count=lambda: devices if available else 0,
                 get_device_name=lambda i: f"NVIDIA Fake GPU {i}",
                 get_device_capability=lambda i: (9, 0),
@@ -813,6 +823,48 @@ class TestPyTorchCollector:
         assert info.is_cuda_build is True
         assert info.cuda_available is False
         assert info.device_count is None
+
+    def test_raising_availability_probe_captures_bounded_error(self):
+        # Maintainer consistency Fix 3: a raising is_available() is direct
+        # runtime-initialization failure evidence — kept separately from a
+        # mere unknown result, bounded like import_error.
+        info = PyTorchCollector(
+            _fake_torch("12.1", probe_error=RuntimeError("cudaErrorInsufficientDriver"))
+        ).collect()
+        assert info.installed is True
+        assert info.cuda_available is None
+        assert info.cuda_probe_error == "RuntimeError: cudaErrorInsufficientDriver"
+        assert info.device_count is None  # enumeration never ran
+        assert info.devices == []
+
+    def test_probe_error_bounded_to_300_chars(self):
+        huge = RuntimeError("x" * 5000)
+        info = PyTorchCollector(_fake_torch("12.1", probe_error=huge)).collect()
+        assert info.cuda_probe_error is not None
+        assert info.cuda_probe_error.startswith("RuntimeError: ")
+        assert len(info.cuda_probe_error) == 300
+
+    def test_clean_results_leave_no_probe_error(self):
+        for available in (True, False):
+            info = PyTorchCollector(_fake_torch("12.1", available=available)).collect()
+            assert info.cuda_available is available
+            assert info.cuda_probe_error is None
+
+    def test_import_failure_never_sets_probe_error(self):
+        def raises(name):
+            raise RuntimeError("libcuda.so.1: cannot open shared object file")
+
+        info = PyTorchCollector(raises).collect()
+        assert info.import_error and "libcuda" in info.import_error
+        assert info.cuda_probe_error is None
+
+    def test_not_installed_leaves_probe_error_unset(self):
+        def raises(name):
+            raise ModuleNotFoundError("No module named 'torch'", name="torch")
+
+        info = PyTorchCollector(raises).collect()
+        assert info.installed is False
+        assert info.cuda_probe_error is None
 
 
 class TestCompilerCollectorLinux:

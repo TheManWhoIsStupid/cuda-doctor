@@ -151,7 +151,10 @@ class PyTorchInfo:
     - ``is_cuda_build=False``        -> CPU-only build;
     - ``is_cuda_build=True`` but ``cuda_available=False`` -> GPU build that
       cannot initialize CUDA (driver/runtime problem);
-    - ``cuda_available=True``        -> CUDA working normally.
+    - ``cuda_available=True``        -> CUDA working normally;
+    - ``cuda_available=None`` with ``cuda_probe_error`` set -> the direct
+      ``torch.cuda.is_available()`` probe *raised* (runtime initialization
+      failure evidence); with no probe error it stays an unknown result.
     """
 
     installed: bool = False
@@ -159,6 +162,11 @@ class PyTorchInfo:
     cuda_version: str | None = None  # torch.version.cuda; None on CPU builds
     is_cuda_build: bool | None = None
     cuda_available: bool | None = None
+    # Bounded evidence that the direct CUDA availability probe raised
+    # (same bounding style as ``import_error``); distinct from a mere
+    # unknown/unavailable result. Never populated when torch is absent or
+    # fails to import — that is ``import_error``'s distinction.
+    cuda_probe_error: str | None = None
     device_count: int | None = None
     cudnn_version: str | None = None
     devices: list[TorchDevice] = field(default_factory=list)

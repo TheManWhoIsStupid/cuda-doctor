@@ -1,31 +1,39 @@
 """D004 — CUDA runtime library conflict.
 
-Diagnoses a statically modeled runtime-library resolution conflict: within
-the explicitly modeled ``LD_LIBRARY_PATH`` search order, a reliably
-identified candidate of a supported family (``libcudart`` / ``libcublas`` /
-``libcudnn``) from a conflicting family is preferred over the environment's
-expected family, which is itself present later in the same modeled ordering
-(frozen semantics §23, truth tables §19). The conclusion is deliberately
-static — it never claims which object a process actually loaded, never
-invents loader precedence between origins (package-local, toolkit, conda,
-ldconfig stay inventory-only), and never exceeds MEDIUM confidence (§19.6:
-HIGH is reserved for future direct loaded-object evidence). Multiplicity
-without modeled precedence stays informational (§19.7); UNKNOWN never
-becomes mismatch (§19.5). The rule is pure over ``DiagnosisFacts`` — no
-collection, no host state, no ELF inspection.
+Diagnoses a statically modeled runtime-library alias conflict over
+OBSERVED EXACT versioned load names (frozen Revision-3 semantics, truth
+tables §19.8/§19.8a). For a supported family (libcudart, libcublas,
+libcudnn) with a known family baseline, an LD_LIBRARY_PATH candidate
+whose exact observed versioned name claims the baseline family resolves
+to a different canonical target family:
 
-TRANSITIONAL R1 STATUS: this module still implements the OLD, NOT-ACCEPTED
-Phase-8 family-level rule. R1 migrated the underlying fact contract to the
-split identity (``load_name`` / ``load_name_family_version`` /
-``target_family_version``) and keeps this rule alive ONLY through the
-private ``_legacy_family_version`` compatibility helper (plan §14). The
-frozen Revision-3 Class A/B rewrite happens in R2 and deletes that helper.
+- Class A — same-name shadowing: a provider of the SAME exact name with
+  a baseline-compatible target appears strictly later in the same
+  modeled ordering, so within the modeled search the incompatible
+  target precedes the compatible one (rows C/D).
+- Class B — independently corroborated misleading alias: a current-Python
+  package-local provider of the SAME exact name is baseline-compatible
+  (row F). A conditional static risk about environment content — never
+  a cross-origin loader winner claim.
+
+Everything else stays conservative (UNKNOWN, no candidate): bare names
+(row E), different names (rows A/B, row S), irrelevant name families
+(rows Q/R), an unknown earliest target which is never skipped over (row
+H), an ambiguous earliest position (§19.5), an uncorroborated alias (row
+G), and any conclusion that would need ELF inspection or precedence
+between origins. ``candidate.reliability`` never enters a conflict
+predicate; its only use is package-local FAMILY BASELINE derivation
+(amendment §8). The conclusion is static: MEDIUM confidence ceiling,
+WARNING severity, and the actually loaded object is never claimed. The
+rule is pure over ``DiagnosisFacts`` — no collection, no host state, no
+ELF inspection.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from cuda_doctor.core.enums import Severity
 from cuda_doctor.diagnosis.facts import (
@@ -51,63 +59,46 @@ __all__ = ["D004RuntimeLibraryConflict"]
 _CODE = "D004"
 _TITLE = "CUDA runtime library conflict"
 
-# Frozen family scope (truth tables §19.2) in the deterministic aggregation
-# order (plan §14: multiple families aggregate into one candidate; this is
-# also the alphabetical order of the three frozen family names).
+# Frozen family scope (truth tables §19.2) in the deterministic
+# aggregation order (amendment §20: family order libcudart, libcublas,
+# libcudnn — also the alphabetical order of the three frozen names).
 _SUPPORTED_FAMILIES = ("libcudart", "libcublas", "libcudnn")
 
-# The only origin whose entry order the collector establishes (facts carry
-# ``modeled_search_order`` exclusively for it — architecture §10.4). The
-# literal matches the frozen origin vocabulary without importing the
-# collector module.
+# The only origin whose entry order the collector establishes (facts
+# carry ``modeled_search_order`` exclusively for it — architecture
+# §10.4). The literal matches the frozen origin vocabulary without
+# importing the collector module.
 _MODELED_ORIGIN = "ld_library_path"
 
-# Package-local candidates establish environment-observed baselines (the
-# current Python environment's own expected library families).
+# Package-local candidates are the only cross-origin evidence the frozen
+# contract allows: the current-Python same-name corroboration behind
+# Class B and the environment-observed family baselines (amendment
+# §11/§20). They never establish loader precedence.
 _BASELINE_ORIGIN = "python_package"
 
-# Version identities reliable enough to support a modeled conflict claim
-# (semantics §23.7 "with reliable version identities"). Weakly derived or
-# unknown identities cannot prove which family a candidate belongs to.
-#
-# TRANSITIONAL R1 LEGACY — DELETE IN R2: this check and every use of
-# ``_legacy_family_version`` below keep the OLD, NOT-ACCEPTED Phase-8
-# family-level rule mechanically testable after the R1 fact-shape
-# migration. R2's Class A/B rewrite replaces the whole predicate and
-# removes them.
-_RELIABLE_RELIABILITIES = frozenset(
+# Identity reliabilities accepted for package-local FAMILY BASELINE
+# derivation only (amendment §7/§8): a name-claimed family (DIRECT) or a
+# bare name's reliably derived canonical target family (DERIVED_STRONG).
+# This is the ONLY place ``candidate.reliability`` is read in D004 — it
+# never qualifies a conflict target, a load name's relevance, or loader
+# precedence.
+_BASELINE_RELIABILITIES = frozenset(
     (IdentityReliability.DIRECT, IdentityReliability.DERIVED_STRONG)
 )
 
 
-def _legacy_family_version(candidate: RuntimeLibraryCandidateFact) -> str | None:
-    """TRANSITIONAL R1 COMPATIBILITY — DELETE IN R2.
-
-    The old Phase-8 rule (reviewed and NOT accepted; superseded in place
-    by the R2 rewrite) reasons over the removed conflated
-    ``family_version`` identity. This private helper reproduces that old
-    filename-first / target-second identity from the new split fields
-    closely enough to keep the transitional rule importable, type-correct,
-    and testable until R2 — nothing else may consume it, it is never
-    exposed in ``DiagnosisFacts``, and it is NOT the new Revision-3
-    semantics.
-    """
-    if candidate.load_name_family_version is not None:
-        return candidate.load_name_family_version
-    return candidate.target_family_version
-
-
 class D004RuntimeLibraryConflict:
-    """Emit D004 when the modeled search order prefers a conflicting family.
+    """Emit D004 when an observed exact versioned load name misleads.
 
-    A family conflict requires three things the static model can actually
-    establish: an expected family baseline, a reliably identified
-    ``ld_library_path`` candidate of a conflicting family at the earliest
-    modeled position, and the expected family itself appearing later in the
-    same modeled ordering (truth tables §19.8). Anything less — multiplicity
-    without precedence, package-local-vs-LDP ambiguity needing
-    RPATH/RUNPATH, ldconfig-only differences, unknown identities or
-    baselines — is UNKNOWN and emits nothing.
+    A positive requires, per family with a known baseline, an
+    LD_LIBRARY_PATH candidate whose exact observed versioned name claims
+    the baseline family while its canonical target family differs, plus
+    either a strictly later same-name baseline-compatible provider
+    (Class A) or an independently observed current-Python same-name
+    baseline-compatible provider (Class B). Anything less — bare names,
+    different names, irrelevant name families, unknown or ambiguous
+    earliest targets, uncorroborated aliases, cross-origin winner
+    questions — is UNKNOWN and emits nothing.
     """
 
     code = _CODE
@@ -159,63 +150,70 @@ class D004RuntimeLibraryConflict:
 
 
 @dataclass(frozen=True)
-class _FamilyFinding:
-    """One family's modeled conflict: preferred candidate vs baseline.
+class _ExactNameFinding:
+    """One family's conflict over one observed exact load name.
 
-    Carries only bounded, presentation-safe identity (family, version,
-    modeled position, reliability) — never a path, entry text, or any raw
-    inventory content.
+    Carries only bounded, presentation-safe identity — family, the exact
+    observed name, the baseline family it claims, the conflicting
+    canonical target family, the conflict class, and the modeled
+    position — never a path, entry text, or any raw inventory content
+    (R2 plan §24).
     """
 
     family: str
-    preferred: RuntimeLibraryCandidateFact
+    load_name: str
     baseline: str
+    conflicting_target_family: str
+    conflict_class: Literal["A", "B"]
+    modeled_order: int
 
 
-def _reliably_known(candidate: RuntimeLibraryCandidateFact) -> bool:
-    """Whether the candidate's family version can prove anything (§13).
+def _baseline_identity(candidate: RuntimeLibraryCandidateFact) -> str | None:
+    """A package-local candidate's FAMILY BASELINE identity (plan §6).
 
-    An absent version or a weakly/unknown-derived identity is not a
-    comparable identity: known-vs-unknown never becomes mismatch.
-
-    TRANSITIONAL R1 LEGACY — DELETE IN R2 (reads the compatibility
-    identity; the R2 Class A/B predicate does not use reliability this
-    way).
+    Scoped to family-baseline derivation and nothing else: the observed
+    name's claimed family when versioned, else the reliably derived
+    canonical target family for a bare alias, else nothing. This is not
+    a conflict identity — conflict predicates read the split identity
+    fields directly and never this helper.
     """
-    return (
-        _legacy_family_version(candidate) is not None
-        and candidate.reliability in _RELIABLE_RELIABILITIES
-    )
+    if candidate.reliability not in _BASELINE_RELIABILITIES:
+        return None
+    if candidate.load_name_family_version is not None:
+        return candidate.load_name_family_version
+    return candidate.target_family_version
 
 
 def _baseline(family: str, libraries: RuntimeLibraryFacts) -> str | None:
-    """The family's expected version baseline, or None for UNKNOWN.
+    """The family's expected family baseline, or None for UNKNOWN.
 
     libcudart compares against the PyTorch CUDA runtime family directly
-    (§11A/§19.8). libcublas may use it only through a reliable mapping —
-    and the only reliable mapping evidence is the environment itself: the
-    current Python environment's own package-local libcublas family,
-    observed alongside the known torch family, establishes what family
-    this PyTorch runtime ships (§19.9/§23.8). No numeric CUDA↔SONAME
-    table is assumed; without the observed pair the relation is UNKNOWN.
-    libcudnn never touches the torch family — its baseline is the
-    environment-local package cuDNN family already normalized in the
-    facts (§11C/§19.10).
+    (§11A/§19.8) — a family label only, never a filename, and never a
+    name synthesized from it. libcublas is contextualized to the current
+    PyTorch CUDA environment: the frozen v0.2 mapping is the environment
+    itself, so the torch family must be known and exactly one distinct
+    reliable package-local libcublas family must be observed (§19.9);
+    zero or several disagreeing ones are UNKNOWN, and no numeric
+    CUDA-major equivalence is ever assumed. libcudnn never touches the
+    torch family — its baseline is the environment-local package cuDNN
+    family already normalized in the facts (§11C/§19.10).
     """
     if family == "libcudart":
         return libraries.torch_runtime_family
     if family == "libcudnn":
         return libraries.package_local_cudnn_family
-    # libcublas: the environment-observed torch-family → package-local pair.
+    # libcublas: the environment-observed package-local family, under a
+    # known torch family.
     if not libraries.torch_runtime_family:
         return None
     observed = {
-        # TRANSITIONAL R1 LEGACY — DELETE IN R2 (compatibility identity).
-        _legacy_family_version(candidate)
-        for candidate in libraries.candidates
-        if candidate.family == family
-        and candidate.origin == _BASELINE_ORIGIN
-        and _reliably_known(candidate)
+        identity
+        for identity in (
+            _baseline_identity(candidate)
+            for candidate in libraries.candidates
+            if candidate.family == family and candidate.origin == _BASELINE_ORIGIN
+        )
+        if identity is not None
     }
     if len(observed) != 1:
         # Zero or several disagreeing package-local families: the mapping
@@ -224,23 +222,35 @@ def _baseline(family: str, libraries: RuntimeLibraryFacts) -> str | None:
     return next(iter(observed))
 
 
-def _family_finding(family: str, libraries: RuntimeLibraryFacts) -> _FamilyFinding | None:
-    """Establish one family's modeled conflict, or None (§19.7-§19.11).
+def _family_finding(
+    family: str, libraries: RuntimeLibraryFacts
+) -> _ExactNameFinding | None:
+    """Establish one family's conflict over exact load names (§19.8).
 
-    Conflict means: the earliest modeled ``ld_library_path`` candidate is a
-    reliably identified member of a family that conflicts with the
-    baseline, while the expected family itself appears later in the same
-    modeled ordering (§19.8 — if the expected copy exists only
-    package-local, deciding the winner needs RPATH/RUNPATH and the
-    resolution is UNKNOWN, §19.11). Candidates from every other origin,
-    and anything the collector could not order, carry no precedence and
-    are never dressed up as winners (§19.4, §19.12).
+    Scans each distinct exact versioned load name observed in the
+    modeled LD_LIBRARY_PATH ordering (amendment §20): relevance requires
+    the name itself to claim the family baseline (rows Q/R); the unique
+    earliest provider must resolve to a known target family different
+    from the baseline — an unknown earliest target is never skipped over
+    (row H), two distinct candidates at the earliest position are
+    ambiguous (§19.5), and an earliest target equal to the baseline is
+    the healthy or normal minor-symlink case (N07/N08). Class A fires
+    when a strictly later same-name provider is baseline-compatible;
+    Class B when an independently observed current-Python package-local
+    provider of the same exact name is. When several names are
+    independently positive, one representative is selected
+    deterministically (plan §17): Class A before Class B, then lower
+    modeled order, then the lexical exact name — presentation
+    determinism that never changes whether the family is positive.
     """
     baseline = _baseline(family, libraries)
     if baseline is None:
         return None
-    # Exact duplicate facts collapse before any ordering decision, so a
-    # repeated candidate neither duplicates evidence nor blocks emission.
+    # Exact duplicate facts collapse before any multiplicity decision,
+    # so duplicates neither manufacture providers nor block emission
+    # (row P); distinct exact names never collapse into one group
+    # (row S). Only ordered, versioned, modeled-origin candidates carry
+    # precedence — everything else is inventory.
     modeled = sorted(
         {
             candidate
@@ -248,106 +258,196 @@ def _family_finding(family: str, libraries: RuntimeLibraryFacts) -> _FamilyFindi
             if candidate.family == family
             and candidate.origin == _MODELED_ORIGIN
             and candidate.modeled_search_order is not None
+            and candidate.load_name_family_version is not None
         },
         key=lambda candidate: (
+            candidate.load_name,
             candidate.modeled_search_order or 0,
-            # TRANSITIONAL R1 LEGACY — DELETE IN R2.
-            _legacy_family_version(candidate) or "",
+            candidate.target_family_version or "",
         ),
     )
-    if not modeled:
+    package_local = [
+        candidate
+        for candidate in libraries.candidates
+        if candidate.family == family and candidate.origin == _BASELINE_ORIGIN
+    ]
+    positives: list[_ExactNameFinding] = []
+    for name in sorted({candidate.load_name for candidate in modeled}):
+        providers = [
+            candidate for candidate in modeled if candidate.load_name == name
+        ]
+        earliest_order = min(
+            candidate.modeled_search_order or 0 for candidate in providers
+        )
+        earliest = [
+            candidate
+            for candidate in providers
+            if (candidate.modeled_search_order or 0) == earliest_order
+        ]
+        if len(earliest) != 1:
+            # Two distinct candidates share the earliest modeled position:
+            # choosing between them needs per-library loader semantics the
+            # model does not cover (§19.5) — resolution UNKNOWN.
+            continue
+        preferred = earliest[0]
+        # Relevance gate (Class A/B condition 3): the observed name itself
+        # must claim the family baseline — validation of an observed name,
+        # never generation of an expected one (rows Q/R).
+        if preferred.load_name_family_version != baseline:
+            continue
+        if preferred.target_family_version is None:
+            # Row H: the earliest provider's target family is unknown;
+            # skipping ahead would fabricate precedence — UNKNOWN.
+            continue
+        if preferred.target_family_version == baseline:
+            # The earliest same-name target already is the expected
+            # family: the healthy case, or a normal minor-version symlink
+            # whose divergent later same-name aliases stay shadowed
+            # (N07/N08).
+            continue
+        later_compatible = any(
+            (candidate.modeled_search_order or 0) > earliest_order
+            and candidate.target_family_version == baseline
+            for candidate in providers
+        )
+        if later_compatible:
+            # Class A (rows C/D): same-name shadowing established entirely
+            # inside the modeled ordering — no cross-origin precedence.
+            positives.append(
+                _ExactNameFinding(
+                    family=family,
+                    load_name=name,
+                    baseline=baseline,
+                    conflicting_target_family=preferred.target_family_version,
+                    conflict_class="A",
+                    modeled_order=earliest_order,
+                )
+            )
+            continue
+        corroborated = any(
+            package_candidate.load_name == name
+            and package_candidate.target_family_version == baseline
+            for package_candidate in package_local
+        )
+        if corroborated:
+            # Class B (row F): an independently observed current-Python
+            # provider of the same exact name is baseline-compatible — a
+            # conditional static risk, never a cross-origin winner claim.
+            positives.append(
+                _ExactNameFinding(
+                    family=family,
+                    load_name=name,
+                    baseline=baseline,
+                    conflicting_target_family=preferred.target_family_version,
+                    conflict_class="B",
+                    modeled_order=earliest_order,
+                )
+            )
+        # else: an uncorroborated misleading alias (row G) or a later
+        # same-name target that is unknown (row I) — UNKNOWN for this
+        # name, no D004.
+    if not positives:
         return None
-    earliest_order = modeled[0].modeled_search_order or 0
-    earliest = [c for c in modeled if (c.modeled_search_order or 0) == earliest_order]
-    if len(earliest) != 1:
-        # Two distinct candidates share the earliest modeled position:
-        # choosing between them needs per-library loader semantics the
-        # model does not cover (§19.5) — resolution UNKNOWN.
-        return None
-    preferred = earliest[0]
-    if not _reliably_known(preferred):
-        # The preferred candidate's family is not reliably identifiable;
-        # skipping it would fabricate precedence for the next entry.
-        return None
-    if _legacy_family_version(preferred) == baseline:
-        # The expected family is what the modeled order prefers (§19.7
-        # N01-N03: matching copies, however many, are no conflict).
-        return None
-    expected_later = any(
-        (candidate.modeled_search_order or 0) > earliest_order
-        and _legacy_family_version(candidate) == baseline
-        and _reliably_known(candidate)
-        for candidate in modeled
+    representative = min(
+        positives,
+        key=lambda finding: (
+            finding.conflict_class != "A",
+            finding.modeled_order,
+            finding.load_name,
+        ),
     )
-    if not expected_later:
-        # The expected copy is not a candidate within the modeled ordering
-        # (§19.8): if it exists only package-local / toolkit / conda /
-        # ldconfig, the winner depends on RPATH/RUNPATH and friends (§19.11,
-        # §19.12) — UNKNOWN, no MEDIUM D004.
-        return None
-    return _FamilyFinding(family=family, preferred=preferred, baseline=baseline)
+    return representative
 
 
-def _summary(findings: Sequence[_FamilyFinding]) -> str:
-    """Modeled-order wording only (semantics §23.7).
-
-    Every clause stays within "preferred among the modeled candidates" /
-    "strongly indicates a conflict within the modeled search order" — no
-    claim about which object any process actually loaded.
-    """
-    described = ", ".join(
-        # TRANSITIONAL R1 LEGACY — DELETE IN R2 (compatibility identity).
-        f"{finding.family} family {_legacy_family_version(finding.preferred)} "
-        f"(expected family {finding.baseline})"
-        for finding in findings
-    )
+def _describe(finding: _ExactNameFinding) -> str:
+    """One finding's clause, per class, in the conditional register."""
+    if finding.conflict_class == "A":
+        return (
+            f"for {finding.family}, within the modeled LD_LIBRARY_PATH "
+            f"lookup for the observed versioned name {finding.load_name} "
+            f"(claims family {finding.baseline}), the incompatible target "
+            f"family {finding.conflicting_target_family} at entry "
+            f"{finding.modeled_order} precedes a compatible same-name "
+            "target"
+        )
     return (
-        "Within the modeled LD_LIBRARY_PATH search order, a conflicting "
-        f"library candidate is preferred over the environment's expected "
-        f"family: {described}. The static inventory strongly indicates a "
-        "runtime-library resolution conflict; which object the process "
-        "actually loads is not observed by this analysis."
+        f"for {finding.family}, an LD_LIBRARY_PATH provider for the "
+        f"observed versioned alias {finding.load_name} (claims family "
+        f"{finding.baseline}) resolves to family "
+        f"{finding.conflicting_target_family}, a different target family "
+        "than an independently observed current-Python compatible "
+        "provider of the same alias"
     )
 
 
-def _evidence(findings: Sequence[_FamilyFinding]) -> list[EvidenceItem]:
-    """Bounded, privacy-safe evidence (plan §18).
+def _summary(findings: Sequence[_ExactNameFinding]) -> str:
+    """Conditional modeled-lookup wording only (semantics §23.7, §25).
 
-    Family, version, origin class, reliability, modeled position, the
-    expected family, and the normalized static relation — never a library
-    path, LD_LIBRARY_PATH contents, conda prefix, site-packages location,
-    or scan-error text.
+    Every clause stays within the modeled same-name lookup (Class A) or
+    the corroborated-alias relation (Class B) — correct for both
+    classes, with no claim about which object any process actually
+    loaded and no cross-origin winner claim.
+    """
+    described = "; ".join(_describe(finding) for finding in findings)
+    return (
+        "Runtime-library alias resolution conflict within the modeled "
+        f"LD_LIBRARY_PATH ordering: {described}. The static inventory "
+        "indicates a conditional resolution risk; the actual loaded "
+        "object is not observed by this analysis."
+    )
+
+
+def _evidence(findings: Sequence[_ExactNameFinding]) -> list[EvidenceItem]:
+    """Bounded, privacy-safe evidence (plan §26, amendment §20 formats).
+
+    Family, the exact observed load-name basename, the claimed baseline
+    family, the conflicting canonical target family, the shadowed or
+    corroborated expected provider, and the normalized static relation —
+    never a library path, LD_LIBRARY_PATH contents, conda prefix,
+    site-packages location, scan-error text, or any reliability label
+    presented as conflict evidence.
     """
     items: list[EvidenceItem] = []
     for finding in findings:
-        preferred = finding.preferred
         items.append(
             EvidenceItem(
                 key=f"{finding.family}_conflicting",
                 value=(
-                    # TRANSITIONAL R1 LEGACY — DELETE IN R2.
-                    f"family {_legacy_family_version(preferred)} at "
-                    f"LD_LIBRARY_PATH entry {preferred.modeled_search_order} "
-                    f"({preferred.reliability.value})"
+                    f"observed versioned load name {finding.load_name} "
+                    f"(claims family {finding.baseline}) at "
+                    f"LD_LIBRARY_PATH entry {finding.modeled_order} "
+                    f"resolves to family {finding.conflicting_target_family} "
+                    "(derived strongly from its symlink target)"
                 ),
                 source="runtime_libraries",
+            )
+        )
+        expected = (
+            f"family {finding.baseline} provider of {finding.load_name} "
+            "shadowed at a later entry"
+            if finding.conflict_class == "A"
+            else (
+                f"family {finding.baseline} package-local provider of "
+                f"{finding.load_name}"
             )
         )
         items.append(
             EvidenceItem(
                 key=f"{finding.family}_expected",
-                value=f"family {finding.baseline}",
+                value=expected,
                 source=(
-                    "torch"
-                    if finding.family == "libcudart"
-                    else "runtime_libraries"
+                    "torch" if finding.family == "libcudart" else "runtime_libraries"
                 ),
             )
         )
     items.append(
         EvidenceItem(
             key="static_relation",
-            value="conflicting candidate preferred within the modeled search order",
+            value=(
+                "same-name shadowing / misleading alias on an observed "
+                "versioned load name within the modeled LD_LIBRARY_PATH "
+                "ordering"
+            ),
             source="compatibility",
         )
     )
@@ -356,15 +456,19 @@ def _evidence(findings: Sequence[_FamilyFinding]) -> list[EvidenceItem]:
 
 def _impact() -> list[ImpactItem]:
     """Expected impact, preserving the §23.3 existence/precedence/loaded
-    distinction inside the diagnosis output itself."""
+    distinction inside the diagnosis output itself (plan §27: alias
+    resolution at risk; no certainty claim)."""
     return [
         ImpactItem(
             scope="CUDA runtime library resolution",
-            status="conflicting family preferred within the modeled search order",
+            status=(
+                "alias resolution at risk under the modeled or "
+                "conditional LD_LIBRARY_PATH semantics"
+            ),
         ),
         ImpactItem(
             scope="PyTorch CUDA initialization",
-            status="at risk if the modeled resolution applies",
+            status="may be affected if the modeled or conditional resolution applies",
         ),
         ImpactItem(
             scope="actually loaded library",
@@ -374,13 +478,15 @@ def _impact() -> list[ImpactItem]:
 
 
 def _remediation() -> list[RemediationStep]:
-    """Read-only SAFE guidance (truth tables §19.15, semantics plan §19).
+    """Read-only SAFE guidance (truth tables §19.15, R2 plan §28).
 
     D004 cannot know which runtime-library source the user intends or
     which entry is safe to change, so every step carries ``command=None``
     and no path, version, entry text, or package-manager action is
     invented. Deleting or overwriting shared libraries is never
-    recommended; only the search configuration may be simplified.
+    recommended; only the search configuration may be simplified. For a
+    Class B finding nothing asserts that the package-local copy would
+    win once the override is removed — that precedence is not modeled.
     """
     return [
         RemediationStep(

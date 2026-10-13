@@ -1,11 +1,19 @@
-"""Tests for the D004 CUDA runtime library conflict rule.
+"""Tests for the D004 CUDA runtime library conflict rule (Revision 3).
 
-The rule is tested over synthetic ``DiagnosisFacts`` (truth tables §19):
-collector and normalization behavior is pinned by the Phase-3/Phase-5
-suites; here only the diagnosis decision over already-normalized facts
-matters. Frozen truth-table row IDs appear in test names/comments
-(D004-N01 ... D004-N04 plus the §19.8-§19.13 scenario families) so the
-coverage stays auditable against the frozen tables.
+The rule is tested over synthetic ``DiagnosisFacts`` (truth tables §19,
+amendment §19.8a rows A-S): collector and normalization behavior is
+pinned by the Phase-3/Phase-5 suites; here only the exact-load-name
+Class-A/Class-B decision over already-normalized facts matters. Frozen
+row IDs appear in test names/comments (rows A-S, N05-N13 plus the
+§19.8-§19.13 scenario families) so the coverage stays auditable against
+the frozen tables. Amendment §21 classification: every old test that
+constructed only the deleted family-level identity was rewritten to the
+split ``load_name`` / ``load_name_family_version`` /
+``target_family_version`` surface, the old family-only canonical
+positive (row-A shape) is now a pinned NEGATIVE, and
+``test_winner_decided_inside_the_model_emits`` flips to negative by
+frozen mandate — these are semantic flips required by Revision 3, not
+weakenings.
 """
 
 from __future__ import annotations
@@ -78,17 +86,19 @@ def lib(
     reliability: IdentityReliability = IdentityReliability.DIRECT,
     active: Trinary = Trinary.UNKNOWN,
     target: str | None = None,
+    name: str | None = None,
 ) -> RuntimeLibraryCandidateFact:
     """Synthetic normalized candidate; only the D004 surface is populated.
 
-    R1 shape migration: the old synthetic ``version`` concept is now the
-    split identity the transitional rule reads — a versioned exact load
-    name claiming that family (``load_name_family_version``), optionally
-    with a canonical-target family (``target``). ``version=None`` means
-    no name-derived identity at all: bare name, ``load_name_family_version``
-    ``None``.
+    Revision-3 split identity: ``version`` is the family the observed
+    name CLAIMS (``load_name_family_version``); ``target`` is the
+    canonical target family (``target_family_version``). ``version=None``
+    means a bare name with no claim (ineligible for both classes).
+    ``name`` overrides the derived exact name for multi-component tails
+    — e.g. an observed ``11.0`` tail whose first numeric component
+    claims family 11 — and the exact string is never normalized.
     """
-    load_name = f"{family}.so.{version}" if version is not None else f"{family}.so"
+    load_name = name or (f"{family}.so.{version}" if version is not None else f"{family}.so")
     return RuntimeLibraryCandidateFact(
         family=family,
         load_name=load_name,
@@ -177,14 +187,43 @@ def sel(
 
 
 def conflict_facts() -> DiagnosisFacts:
-    """The canonical D004 environment (truth tables §19.8): torch CUDA 12
-    build, LD_LIBRARY_PATH preferring a CUDA 11 libcudart with the expected
-    CUDA 12 copy later in the same modeled ordering."""
+    """The canonical Revision-3 D004 environment (row C): torch CUDA 12
+    baseline; within the modeled LD_LIBRARY_PATH ordering the exact
+    observed name libcudart.so.12 first resolves to family 11 (a
+    misleading symlink) and later to family 12 — same-name shadowing."""
     return facts_with(
         runtime_facts(
             candidates=(
-                lib("libcudart", "11", order=0),
-                lib("libcudart", "12", order=1),
+                lib("libcudart", "12", order=0, target="11"),
+                lib("libcudart", "12", order=1, target="12"),
+            )
+        )
+    )
+
+
+def class_b_facts() -> DiagnosisFacts:
+    """Row F: the misleading alias is corroborated only by an
+    independently observed current-Python provider of the same exact
+    name (no later LDP provider exists)."""
+    return facts_with(
+        runtime_facts(
+            candidates=(
+                lib("libcudart", "12", order=0, target="11"),
+                lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target="12"),
+            )
+        )
+    )
+
+
+def legacy_shape_facts() -> DiagnosisFacts:
+    """The old NOT-ACCEPTED family-level canonical shape — now row A:
+    different exact names never shadow one another merely because their
+    claimed families differ."""
+    return facts_with(
+        runtime_facts(
+            candidates=(
+                lib("libcudart", "11", order=0, target="11"),
+                lib("libcudart", "12", order=1, target="12"),
             )
         )
     )
@@ -208,10 +247,11 @@ def raw(
 ) -> RuntimeLibraryCandidate:
     """A raw Phase-3 inventory candidate for builder-based tests.
 
-    R1: ``canonical_path`` lets a synthetic candidate simulate what the
-    strict collector records for a resolvable symlink target (synthetic
-    fixtures never touch the real filesystem); a bare name is expressed
-    with ``version=None`` and an explicit bare ``path``.
+    ``canonical_path`` lets a synthetic candidate simulate what the
+    strict collector records for a resolvable symlink target or a
+    regular file (canonical = itself); synthetic fixtures never touch
+    the real filesystem. A bare name is expressed with ``version=None``
+    and an explicit bare ``path``.
     """
     suffix = f".so.{version}" if version is not None else ".so"
     return RuntimeLibraryCandidate(
@@ -299,8 +339,8 @@ class TestPlatformGate:
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", order=0),
-                    lib("libcudart", "12", order=1),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=1, target="12"),
                 )
             ),
             platform=platform,
@@ -314,8 +354,8 @@ class TestPlatformGate:
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", order=0),
-                    lib("libcudart", "12", order=1),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=1, target="12"),
                 )
             ),
             applicability=replace(base.applicability, d004=False),
@@ -323,24 +363,328 @@ class TestPlatformGate:
         assert RULE.evaluate(facts, []) is None
 
 
+class TestTruthTableRows:
+    """Every frozen Revision-3 row A-S (amendment §19.8a), pinned
+    explicitly against the rewritten rule."""
+
+    def test_row_a_different_names_never_shadow(self):
+        # Different exact names (.so.11 vs .so.12) never form one
+        # same-name group, whatever their claimed/target families are.
+        assert RULE.evaluate(legacy_shape_facts(), []) is None
+
+    def test_row_b_cuda_11_style_different_names(self):
+        # baseline 11; .so.10.2 -> 10 at entry 0 and .so.11.0 -> 11 at
+        # entry 1 are different lookup identities — no shadowing.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "10", order=0, target="10", name="libcudart.so.10.2"),
+                    lib("libcudart", "11", order=1, target="11", name="libcudart.so.11.0"),
+                ),
+                torch_family="11",
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    def test_row_c_same_name_class_a(self):
+        candidate = RULE.evaluate(conflict_facts(), [])
+        assert candidate is not None
+        assert candidate.diagnosis.confidence is Confidence.MEDIUM
+        assert candidate.diagnosis.severity is Severity.WARNING
+
+    def test_row_d_cuda_11_style_class_a(self):
+        # baseline 11; the exact name libcudart.so.11.0 resolves to
+        # family 10 first and to family 11 later — same-name shadowing
+        # with the exact multi-component tail preserved.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "11", order=0, target="10", name="libcudart.so.11.0"),
+                    lib("libcudart", "11", order=1, target="11", name="libcudart.so.11.0"),
+                ),
+                torch_family="11",
+            )
+        )
+        candidate = RULE.evaluate(facts, [])
+        assert candidate is not None
+        assert candidate.diagnosis.confidence is Confidence.MEDIUM
+
+    def test_row_e_bare_development_aliases(self):
+        # libcudart.so -> 11 and libcudart.so -> 12: bare names are
+        # ineligible lookup identities for both classes.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", None, order=0, target="11"),
+                    lib("libcudart", None, order=1, target="12"),
+                )
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    def test_row_f_class_b_independently_corroborated(self):
+        candidate = RULE.evaluate(class_b_facts(), [])
+        assert candidate is not None
+        assert candidate.diagnosis.confidence is Confidence.MEDIUM
+        assert candidate.risk_only is True
+
+    def test_row_g_uncorroborated_misleading_alias(self):
+        # Anti-circularity: the alias cannot establish its own relevance
+        # by claiming family 12 in its filename alone.
+        facts = facts_with(
+            runtime_facts(candidates=(lib("libcudart", "12", order=0, target="11"),))
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    def test_row_h_earliest_same_name_target_unknown(self):
+        # Do not skip the earliest provider: its unknown target family
+        # makes the whole exact-name path UNKNOWN even though a later
+        # same-name baseline-compatible provider exists.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0),
+                    lib("libcudart", "12", order=1, target="12"),
+                )
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    def test_row_i_later_target_unknown_without_corroboration(self):
+        # Class A is not established by a later same-name provider whose
+        # target family is unknown, and nothing corroborates Class B.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=1),
+                )
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    def test_row_i_class_b_may_still_emit_via_corroboration(self):
+        # The same row-I shape with an independent same-name package
+        # provider: the later unknown LDP provider is irrelevant to the
+        # Class-B relation, which fires on its own evidence.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=1),
+                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target="12"),
+                )
+            )
+        )
+        assert RULE.evaluate(facts, []) is not None
+
+    def test_row_j_no_manufactured_cross_origin_winner(self):
+        # The package-local compatible provider carries a DIFFERENT
+        # exact name, so it cannot corroborate; deciding the winner
+        # would need RPATH/RUNPATH knowledge — resolution UNKNOWN.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib(
+                        "libcudart",
+                        "12",
+                        origin=ORIGIN_PYTHON_PACKAGE,
+                        target="12",
+                        name="libcudart.so.12.1",
+                    ),
+                )
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    def test_row_k_ldconfig_same_name_conflict_alone(self):
+        # A same-name conflict visible only through ldconfig carries no
+        # modeled ordering and no precedence (§19.12).
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", origin=ORIGIN_LDCONFIG, target="11"),
+                    lib("libcudart", "12", origin=ORIGIN_LDCONFIG, target="12"),
+                )
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    def test_row_l_active_toolkit_alone_creates_no_precedence(self):
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", origin=ORIGIN_TOOLKIT, active=Trinary.TRUE, target="11"),
+                    lib("libcudart", "12", origin=ORIGIN_TOOLKIT, active=Trinary.TRUE, target="12"),
+                )
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    @pytest.mark.parametrize("torch_family", [None, "11", "13"])
+    def test_row_m_cudnn_class_a_is_torch_invariant(self, torch_family):
+        # cuDNN uses its own package-local baseline (§19.10); the torch
+        # runtime family must not change the outcome.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudnn", "9", order=0, target="8"),
+                    lib("libcudnn", "9", order=1, target="9"),
+                ),
+                torch_family=torch_family,
+                cudnn_family="9",
+            )
+        )
+        baseline = RULE.evaluate(
+            facts_with(
+                runtime_facts(
+                    candidates=(
+                        lib("libcudnn", "9", order=0, target="8"),
+                        lib("libcudnn", "9", order=1, target="9"),
+                    ),
+                    cudnn_family="9",
+                )
+            ),
+            [],
+        )
+        assert baseline is not None
+        assert RULE.evaluate(facts, []) == baseline
+
+    def test_row_n_libcublas_class_a_via_observed_package_baseline(self):
+        # The baseline is the uniquely reliable environment-observed
+        # package-local libcublas family (torch 12 + package family 12);
+        # no CUDA-major == libcublas-family numeric assumption exists.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcublas", "12", order=0, target="11"),
+                    lib("libcublas", "12", order=1, target="12"),
+                    lib("libcublas", "12", origin=ORIGIN_PYTHON_PACKAGE),
+                )
+            )
+        )
+        candidate = RULE.evaluate(facts, [])
+        assert candidate is not None
+        assert candidate.diagnosis.confidence is Confidence.MEDIUM
+
+    def test_row_o_scan_incomplete_does_not_invalidate_class_a(self):
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=1, target="12"),
+                ),
+                scan_incomplete=True,
+            )
+        )
+        candidate = RULE.evaluate(facts, [])
+        assert candidate is not None
+        assert candidate.diagnosis.confidence is Confidence.MEDIUM
+
+    def test_row_o_scan_incomplete_does_not_invalidate_class_b(self):
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target="12"),
+                ),
+                scan_incomplete=True,
+            )
+        )
+        assert RULE.evaluate(facts, []) is not None
+
+    def test_row_p_exact_duplicates_are_inert(self):
+        baseline = RULE.evaluate(conflict_facts(), [])
+        duplicated = RULE.evaluate(
+            facts_with(
+                runtime_facts(
+                    candidates=(
+                        lib("libcudart", "12", order=0, target="11"),
+                        lib("libcudart", "12", order=0, target="11"),
+                        lib("libcudart", "12", order=1, target="12"),
+                        lib("libcudart", "12", order=1, target="12"),
+                    )
+                )
+            ),
+            [],
+        )
+        assert duplicated is not None
+        assert duplicated == baseline
+
+    def test_row_q_irrelevant_same_name_alias(self):
+        # .so.99 -> 11 and .so.99 -> 12 under baseline 12: the observed
+        # name claims family 99, not the baseline — never relevant.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "99", order=0, target="11"),
+                    lib("libcudart", "99", order=1, target="12"),
+                )
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    def test_row_r_irrelevant_corroborated_class_b_shape(self):
+        # Even a perfectly corroborated .so.99 alias stays irrelevant.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "99", order=0, target="11"),
+                    lib("libcudart", "99", origin=ORIGIN_PYTHON_PACKAGE, target="12"),
+                )
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    def test_row_s_exact_name_distinction(self):
+        # libcudart.so.11.0 and libcudart.so.11 are different lookup
+        # identities under baseline 11 — no same-name group forms, so a
+        # .11-provider cannot be the later compatible provider for .11.0.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "11", order=0, target="10", name="libcudart.so.11.0"),
+                    lib("libcudart", "11", order=1, target="11"),
+                ),
+                torch_family="11",
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    def test_row_s_positive_needs_the_same_exact_tail(self):
+        # The same environment with the exact tail repeated: Class A.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "11", order=0, target="10", name="libcudart.so.11.0"),
+                    lib("libcudart", "11", order=1, target="11", name="libcudart.so.11.0"),
+                ),
+                torch_family="11",
+            )
+        )
+        assert RULE.evaluate(facts, []) is not None
+
+
 class TestLibcudartBaseline:
-    def test_19_8_example_conflicting_earlier_entry_emits(self):
-        # Truth tables §19.8: torch.version.cuda 12.4, LD_LIBRARY_PATH [0]
-        # CUDA 11 libcudart, [1] CUDA 12 libcudart -> conflicting copy is
-        # preferred among the modeled candidates.
+    def test_19_8_example_same_name_shadowing_emits(self):
+        # Truth tables §19.8 (rewritten): torch CUDA 12 build; within the
+        # modeled LD_LIBRARY_PATH lookup for the observed exact name
+        # libcudart.so.12, the family-11 target precedes the family-12
+        # target — Class A (row C).
         diagnosis = conflict_diagnosis()
         assert diagnosis.confidence is Confidence.MEDIUM
         assert diagnosis.severity is Severity.WARNING
 
     def test_expected_family_preferred_emits_nothing(self):
-        # D004-N01/N02-shaped: the modeled order prefers the expected
-        # family; however many copies exist, there is no conflict.
+        # D004-N01/N02-shaped: the earliest same-name target already is
+        # the expected family; divergent later copies stay shadowed.
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "12", order=0),
-                    lib("libcudart", "11", order=1),
-                    lib("libcudart", "12", order=2),
+                    lib("libcudart", "12", order=0, target="12"),
+                    lib("libcudart", "12", order=1, target="11"),
+                    lib("libcudart", "12", order=2, target="12"),
                 )
             )
         )
@@ -352,11 +696,11 @@ class TestLibcudartBaseline:
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "12", origin=ORIGIN_LDCONFIG),
-                    lib("libcudart", "12", origin=ORIGIN_TOOLKIT, active=Trinary.TRUE),
-                    lib("libcudart", "12", origin=ORIGIN_CONDA_PREFIX),
-                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE),
-                    lib("libcudart", "12", order=0),
+                    lib("libcudart", "12", origin=ORIGIN_LDCONFIG, target="12"),
+                    lib("libcudart", "12", origin=ORIGIN_TOOLKIT, active=Trinary.TRUE, target="12"),
+                    lib("libcudart", "12", origin=ORIGIN_CONDA_PREFIX, target="12"),
+                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target="12"),
+                    lib("libcudart", "12", order=0, target="12"),
                 )
             )
         )
@@ -368,64 +712,89 @@ class TestLibcudartBaseline:
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", order=0),
-                    lib("libcudart", "12", order=1),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=1, target="12"),
                 ),
                 torch_family=None,
             )
         )
         assert RULE.evaluate(facts, []) is None
 
-    def test_preferred_candidate_unknown_version_is_unknown(self):
-        # §13/§19.5: the preferred candidate's family is not reliably
-        # identifiable; skipping it would fabricate precedence.
+    def test_preferred_candidate_unknown_target_is_unknown(self):
+        # Row H: the earliest same-name provider's target family is
+        # unknown; skipping ahead would fabricate precedence.
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", None, order=0),
-                    lib("libcudart", "12", order=1),
+                    lib("libcudart", "12", order=0),
+                    lib("libcudart", "12", order=1, target="12"),
                 )
             )
         )
         assert RULE.evaluate(facts, []) is None
 
-    @pytest.mark.parametrize(
-        "reliability",
-        [IdentityReliability.UNKNOWN, IdentityReliability.DERIVED_WEAK],
-        ids=["unknown", "derived-weak"],
-    )
-    def test_unreliable_preferred_identity_is_not_a_conflict(self, reliability):
-        facts = facts_with(
-            runtime_facts(
-                candidates=(
-                    lib("libcudart", "11", order=0, reliability=reliability),
-                    lib("libcudart", "12", order=1),
+    def test_reliability_never_gates_the_conflict_predicate(self):
+        # R2 plan §4: reliability is not conflict evidence. Even a
+        # synthetic UNKNOWN-reliability row-C pair (builder-impossible
+        # shape) emits the identical candidate — the split identity
+        # fields alone decide, and only baseline derivation reads
+        # reliability.
+        baseline = RULE.evaluate(conflict_facts(), [])
+        synthetic = RULE.evaluate(
+            facts_with(
+                runtime_facts(
+                    candidates=(
+                        lib(
+                            "libcudart",
+                            "12",
+                            order=0,
+                            target="11",
+                            reliability=IdentityReliability.UNKNOWN,
+                        ),
+                        lib(
+                            "libcudart",
+                            "12",
+                            order=1,
+                            target="12",
+                            reliability=IdentityReliability.UNKNOWN,
+                        ),
+                    )
                 )
-            )
+            ),
+            [],
         )
-        assert RULE.evaluate(facts, []) is None
+        assert synthetic is not None
+        assert synthetic == baseline
 
     def test_incidental_candidates_never_imply_conflict(self):
         # Toolkit (incidental and active), conda, ldconfig, package copies
-        # with disagreeing families but no modeled precedence.
+        # with disagreeing families but no modeled LD_LIBRARY_PATH
+        # precedence at all.
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", origin=ORIGIN_TOOLKIT, active=Trinary.FALSE),
-                    lib("libcudart", "11", origin=ORIGIN_TOOLKIT, active=Trinary.TRUE),
-                    lib("libcudart", "9", origin=ORIGIN_CONDA_PREFIX),
-                    lib("libcudart", "10", origin=ORIGIN_LDCONFIG),
-                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE),
+                    lib(
+                        "libcudart",
+                        "11",
+                        origin=ORIGIN_TOOLKIT,
+                        active=Trinary.FALSE,
+                        target="11",
+                    ),
+                    lib("libcudart", "11", origin=ORIGIN_TOOLKIT, active=Trinary.TRUE, target="11"),
+                    lib("libcudart", "9", origin=ORIGIN_CONDA_PREFIX, target="9"),
+                    lib("libcudart", "10", origin=ORIGIN_LDCONFIG, target="10"),
+                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target="12"),
                 )
             )
         )
         assert RULE.evaluate(facts, []) is None
 
-    def test_conflict_without_any_expected_copy_is_not_medium(self):
-        # §19.8 requires the expected copy within the modeled ordering; a
-        # lone conflicting LDP entry proves no winner.
+    def test_conflict_without_any_expected_form_is_not_medium(self):
+        # A lone misleading alias with neither a later same-name LDP
+        # provider nor a same-name package provider proves nothing
+        # (row G).
         facts = facts_with(
-            runtime_facts(candidates=(lib("libcudart", "11", order=0),))
+            runtime_facts(candidates=(lib("libcudart", "12", order=0, target="11"),))
         )
         assert RULE.evaluate(facts, []) is None
 
@@ -439,8 +808,8 @@ class TestActiveToolkit:
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", origin=ORIGIN_TOOLKIT, active=Trinary.TRUE),
-                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE),
+                    lib("libcudart", "11", origin=ORIGIN_TOOLKIT, active=Trinary.TRUE, target="11"),
+                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target="12"),
                 )
             )
         )
@@ -450,7 +819,13 @@ class TestActiveToolkit:
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", origin=ORIGIN_TOOLKIT, active=Trinary.FALSE),
+                    lib(
+                        "libcudart",
+                        "11",
+                        origin=ORIGIN_TOOLKIT,
+                        active=Trinary.FALSE,
+                        target="11",
+                    ),
                 )
             )
         )
@@ -460,24 +835,43 @@ class TestActiveToolkit:
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", origin=ORIGIN_TOOLKIT, active=Trinary.UNKNOWN),
+                    lib(
+                        "libcudart",
+                        "11",
+                        origin=ORIGIN_TOOLKIT,
+                        active=Trinary.UNKNOWN,
+                        target="11",
+                    ),
                 )
             )
         )
         assert RULE.evaluate(facts, []) is None
 
     def test_active_and_incidental_coexist_without_collapsing_roles(self):
-        # Adding active/incidental toolkit copies to a real modeled conflict
-        # changes neither the decision nor the bounded evidence.
+        # Adding active/incidental same-name toolkit copies (which would
+        # look like compatible providers if origins leaked) to a real
+        # modeled conflict changes neither the decision nor the evidence.
         standalone = RULE.evaluate(conflict_facts(), [])
         with_toolkits = RULE.evaluate(
             facts_with(
                 runtime_facts(
                     candidates=(
-                        lib("libcudart", "11", origin=ORIGIN_TOOLKIT, active=Trinary.TRUE),
-                        lib("libcudart", "11", origin=ORIGIN_TOOLKIT, active=Trinary.FALSE),
-                        lib("libcudart", "11", order=0),
-                        lib("libcudart", "12", order=1),
+                        lib(
+                            "libcudart",
+                            "12",
+                            origin=ORIGIN_TOOLKIT,
+                            active=Trinary.TRUE,
+                            target="12",
+                        ),
+                        lib(
+                            "libcudart",
+                            "12",
+                            origin=ORIGIN_TOOLKIT,
+                            active=Trinary.FALSE,
+                            target="12",
+                        ),
+                        lib("libcudart", "12", order=0, target="11"),
+                        lib("libcudart", "12", order=1, target="12"),
                     )
                 )
             ),
@@ -485,14 +879,14 @@ class TestActiveToolkit:
         )
         assert with_toolkits == standalone
 
-    def test_active_toolkit_expected_with_ldp_conflict_stays_unknown(self):
-        # Cross-origin winner (active toolkit vs LDP) needs unmodeled loader
-        # semantics — §19.11 applies, no MEDIUM D004.
+    def test_active_toolkit_cannot_corroborate_class_b(self):
+        # §19.11: only the frozen python_package same-name corroboration
+        # crosses origins — an active toolkit provider never does.
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", order=0),
-                    lib("libcudart", "12", origin=ORIGIN_TOOLKIT, active=Trinary.TRUE),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", origin=ORIGIN_TOOLKIT, active=Trinary.TRUE, target="12"),
                 )
             )
         )
@@ -504,11 +898,13 @@ class TestLdpOrdering:
         assert RULE.evaluate(conflict_facts(), []) is not None
 
     def test_reversed_ordering_emits_nothing(self):
+        # N07: the earliest same-name target is the expected family; the
+        # divergent later alias stays shadowed.
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "12", order=0),
-                    lib("libcudart", "11", order=1),
+                    lib("libcudart", "12", order=0, target="12"),
+                    lib("libcudart", "12", order=1, target="11"),
                 )
             )
         )
@@ -516,21 +912,21 @@ class TestLdpOrdering:
 
     def test_missing_search_order_invents_no_precedence(self):
         # Plan §8: an LDP candidate whose entry order was never established
-        # is unordered — it is neither the preferred candidate nor the
-        # expected-later one.
+        # is unordered — it is neither the earliest provider nor the later
+        # same-name compatible one.
         unordered_conflict = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", order=None),
-                    lib("libcudart", "12", order=1),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=None, target="12"),
                 )
             )
         )
         unordered_expected = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", order=0),
-                    lib("libcudart", "12", order=None),
+                    lib("libcudart", "12", order=None, target="11"),
+                    lib("libcudart", "12", order=1, target="12"),
                 )
             )
         )
@@ -543,53 +939,53 @@ class TestLdpOrdering:
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", order=0),
-                    lib("libcudart", "12", origin=ORIGIN_TOOLKIT, order=5),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", origin=ORIGIN_TOOLKIT, order=5, target="12"),
                 )
             )
         )
         assert RULE.evaluate(facts, []) is None
 
     def test_unknown_earliest_entry_blocks_even_with_later_conflict(self):
-        # §19.5: the preferred entry's identity is unknown, so no later
-        # entry can be promoted to "preferred among modeled candidates".
+        # Row H: the earliest same-name provider's target family is
+        # unknown, so no later entry can be promoted.
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", None, order=0),
-                    lib("libcudart", "11", order=1),
-                    lib("libcudart", "12", order=2),
+                    lib("libcudart", "12", order=0),
+                    lib("libcudart", "12", order=1, target="11"),
+                    lib("libcudart", "12", order=2, target="12"),
                 )
             )
         )
         assert RULE.evaluate(facts, []) is None
 
     def test_two_distinct_candidates_at_the_earliest_entry_are_unknown(self):
-        # §19.5: distinguishing two files within one directory needs
-        # per-library loader semantics the model does not cover.
+        # §19.5: two distinct same-name candidates share the earliest
+        # modeled position; choosing between them needs per-library
+        # loader semantics the model does not cover.
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", order=0),
-                    lib("libcudart", "12", order=0),
-                    lib("libcudart", "12", order=1),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=0, target="10"),
+                    lib("libcudart", "12", order=1, target="12"),
                 )
             )
         )
         assert RULE.evaluate(facts, []) is None
 
     def test_duplicate_candidates_neither_block_nor_duplicate(self):
-        # Plan §22 K: exact duplicates collapse; the emission and its
-        # evidence equal the non-duplicated scenario.
+        # Row P: exact duplicates collapse; the emission and its evidence
+        # equal the non-duplicated scenario.
         baseline = RULE.evaluate(conflict_facts(), [])
         duplicated = RULE.evaluate(
             facts_with(
                 runtime_facts(
                     candidates=(
-                        lib("libcudart", "11", order=0),
-                        lib("libcudart", "11", order=0),
-                        lib("libcudart", "12", order=1),
-                        lib("libcudart", "12", order=1),
+                        lib("libcudart", "12", order=0, target="11"),
+                        lib("libcudart", "12", order=0, target="11"),
+                        lib("libcudart", "12", order=1, target="12"),
                     )
                 )
             ),
@@ -598,12 +994,39 @@ class TestLdpOrdering:
         assert duplicated is not None
         assert duplicated == baseline
 
+    def test_n07_divergent_later_same_name_alias_stays_shadowed(self):
+        # The healthy majority shape: earliest target == baseline, a
+        # divergent same-name copy later — shadowed, not a conflict.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0, target="12"),
+                    lib("libcudart", "12", order=1, target="11"),
+                    lib("libcudart", "12", order=2, target="12"),
+                )
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    def test_n08_normal_minor_version_symlink_is_healthy(self):
+        # libcudart.so.12 -> libcudart.so.12.4.127 is the normal minor
+        # symlink: the target family equals the claimed family.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0, target="12"),
+                    lib("libcudart", "12", order=1, target="12"),
+                )
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
 
 class TestPythonPackageInteraction:
     def test_package_local_matching_candidate_alone_emits_nothing(self):
         facts = facts_with(
             runtime_facts(
-                candidates=(lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE),)
+                candidates=(lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target="12"),)
             )
         )
         assert RULE.evaluate(facts, []) is None
@@ -611,40 +1034,161 @@ class TestPythonPackageInteraction:
     def test_19_11_package_local_expected_vs_ldp_conflict_is_unknown(self):
         # Truth tables §19.11 / plan §24: the only way to pick the winner
         # is ELF RPATH/RUNPATH knowledge — resolution UNKNOWN, no MEDIUM.
+        # (The package copy here has no exact same-name form.)
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", order=0),
-                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target=None),
                 )
             )
         )
         assert RULE.evaluate(facts, []) is None
 
-    def test_winner_decided_inside_the_model_emits(self):
-        # The same environment with the expected copy also modeled later:
-        # no host binary inspection is needed or used.
+    def test_old_family_level_winner_shape_flips_to_negative(self):
+        # Amendment §21 mandated flip: the old
+        # "winner decided inside the model" shape (different names
+        # .so.11@0 / .so.12@1 plus a package-local family-12 copy)
+        # emitted under the NOT-ACCEPTED family-level rule; under
+        # Revision 3 the exact names differ, so nothing shadows anything
+        # (row A) and the package copy corroborates nothing.
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", order=0),
-                    lib("libcudart", "12", order=1),
-                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE),
+                    lib("libcudart", "11", order=0, target="11"),
+                    lib("libcudart", "12", order=1, target="12"),
+                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target="12"),
                 )
             )
         )
-        assert RULE.evaluate(facts, []) is not None
+        assert RULE.evaluate(facts, []) is None
 
     def test_package_local_conflict_alone_is_not_a_winner_claim(self):
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", origin=ORIGIN_PYTHON_PACKAGE),
-                    lib("libcudart", "12", order=0),
+                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target="11"),
+                    lib("libcudart", "12", order=0, target="12"),
                 )
             )
         )
         assert RULE.evaluate(facts, []) is None
+
+
+class TestClassBCorroboration:
+    """The frozen Class-B relation (amendment §12/§14/§15): an
+    independently observed current-Python same-name provider with a
+    baseline-compatible target, and nothing else, corroborates."""
+
+    def test_anti_circularity_uncorroborated_alias_never_emits(self):
+        # Row G stated for Class B: the suspicious LDP candidate can
+        # never establish its own relevance; without an independent
+        # same-name package provider there is no Class B.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "11", origin=ORIGIN_PYTHON_PACKAGE, target="11"),
+                )
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    def test_different_exact_package_name_does_not_corroborate(self):
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib(
+                        "libcudart",
+                        "12",
+                        origin=ORIGIN_PYTHON_PACKAGE,
+                        target="12",
+                        name="libcudart.so.12.1",
+                    ),
+                )
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    def test_bare_package_alias_does_not_corroborate(self):
+        # A bare package name (no versioned claim) is not the same
+        # versioned lookup identity.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", None, origin=ORIGIN_PYTHON_PACKAGE, target="12"),
+                )
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    def test_package_candidate_with_conflicting_target_does_not_corroborate(self):
+        # Same exact name, but the package copy itself resolves to the
+        # conflicting family — no baseline-compatible form observed.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target="11"),
+                )
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    @pytest.mark.parametrize(
+        "origin", [ORIGIN_LDCONFIG, ORIGIN_CONDA_PREFIX, ORIGIN_TOOLKIT]
+    )
+    def test_only_python_package_origin_corroborates(self, origin):
+        # The frozen cross-origin allowance is current-Python
+        # python_package only (§19.11/§19.12).
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", origin=origin, target="12"),
+                )
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    def test_class_b_never_claims_a_cross_origin_winner(self):
+        # Row F emits — but only as a conditional static risk; nothing in
+        # the environmental claims (summary, evidence, impact) says the
+        # package-local copy wins, loads, or is preferred across origins.
+        # The frozen §28 remediation prose ("an earlier entry wins within
+        # the modeled search order") is scoped guidance about the modeled
+        # ordering, not a cross-origin loader claim, so it is not scanned.
+        candidate = RULE.evaluate(class_b_facts(), [])
+        assert candidate is not None
+        claimed = " ".join(
+            [candidate.diagnosis.summary]
+            + [item.value for item in candidate.diagnosis.evidence]
+            + [f"{item.scope} {item.status}" for item in candidate.diagnosis.impact]
+        )
+        for forbidden in ("wins", "winner", "will load", "is loaded", "definitely loads"):
+            assert forbidden not in claimed, forbidden
+        assert "independently observed current-Python" in candidate.diagnosis.summary
+
+    def test_class_a_preferred_over_class_b_for_the_same_conflict(self):
+        # Plan §16: when the same family + exact name satisfies both
+        # classes, Class A is the representative — one diagnosis, no
+        # duplicated evidence.
+        both = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=1, target="12"),
+                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target="12"),
+                )
+            )
+        )
+        class_a_only = conflict_facts()
+        first = RULE.evaluate(both, [])
+        second = RULE.evaluate(class_a_only, [])
+        assert first is not None and second is not None
+        assert first == second  # Class A evidence shape, not Class B
 
 
 class TestConda:
@@ -652,8 +1196,8 @@ class TestConda:
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", origin=ORIGIN_CONDA_PREFIX),
-                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE),
+                    lib("libcudart", "11", origin=ORIGIN_CONDA_PREFIX, target="11"),
+                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target="12"),
                 )
             )
         )
@@ -665,9 +1209,9 @@ class TestConda:
             facts_with(
                 runtime_facts(
                     candidates=(
-                        lib("libcudart", "11", origin=ORIGIN_CONDA_PREFIX),
-                        lib("libcudart", "11", order=0),
-                        lib("libcudart", "12", order=1),
+                        lib("libcudart", "11", origin=ORIGIN_CONDA_PREFIX, target="11"),
+                        lib("libcudart", "12", order=0, target="11"),
+                        lib("libcudart", "12", order=1, target="12"),
                     )
                 )
             ),
@@ -675,12 +1219,14 @@ class TestConda:
         )
         assert with_conda == standalone
 
-    def test_conda_expected_with_ldp_conflict_stays_unknown(self):
+    def test_conda_cannot_corroborate_class_b(self):
+        # §19.11: conda stays inventory-only; only the frozen python_package
+        # same-name corroboration crosses origins.
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", order=0),
-                    lib("libcudart", "12", origin=ORIGIN_CONDA_PREFIX),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", origin=ORIGIN_CONDA_PREFIX, target="12"),
                 )
             )
         )
@@ -695,8 +1241,8 @@ class TestLdconfig:
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", origin=ORIGIN_LDCONFIG),
-                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE),
+                    lib("libcudart", "11", origin=ORIGIN_LDCONFIG, target="11"),
+                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target="12"),
                 )
             )
         )
@@ -708,9 +1254,9 @@ class TestLdconfig:
             facts_with(
                 runtime_facts(
                     candidates=(
-                        lib("libcudart", "9", origin=ORIGIN_LDCONFIG),
-                        lib("libcudart", "11", order=0),
-                        lib("libcudart", "12", order=1),
+                        lib("libcudart", "9", origin=ORIGIN_LDCONFIG, target="9"),
+                        lib("libcudart", "12", order=0, target="11"),
+                        lib("libcudart", "12", order=1, target="12"),
                     )
                 )
             ),
@@ -718,13 +1264,28 @@ class TestLdconfig:
         )
         assert with_ldconfig == standalone
 
-    def test_ldconfig_never_receives_a_modeled_order(self):
-        # A stray search_order on an ldconfig candidate is not precedence.
+    def test_ldconfig_cannot_corroborate_class_b(self):
+        # Row K for Class B: ldconfig presence must not alter an otherwise
+        # identical decision and can never replace the package-local
+        # corroboration.
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", origin=ORIGIN_LDCONFIG, order=0),
-                    lib("libcudart", "12", order=1),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", origin=ORIGIN_LDCONFIG, target="12"),
+                )
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    def test_ldconfig_never_receives_a_modeled_order(self):
+        # A stray search_order on an ldconfig candidate (impossible
+        # through the builder) is not precedence.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", origin=ORIGIN_LDCONFIG, order=0, target="11"),
+                    lib("libcudart", "12", order=1, target="12"),
                 )
             )
         )
@@ -734,63 +1295,55 @@ class TestLdconfig:
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "10", origin=ORIGIN_LDCONFIG),
-                    lib("libcudnn", "7", origin=ORIGIN_LDCONFIG),
+                    lib("libcudart", "10", origin=ORIGIN_LDCONFIG, target="10"),
+                    lib("libcudnn", "7", origin=ORIGIN_LDCONFIG, target="7"),
                 )
             )
         )
         assert RULE.evaluate(facts, []) is None
 
 
-class TestLibcublasMapping:
-    def _mapped(self, package_family: str) -> RuntimeLibraryFacts:
+class TestLibcublasBaseline:
+    """Plan §32 matrix, pinned for the environment-observed baseline."""
+
+    def _class_a(self, package_family: str) -> RuntimeLibraryFacts:
         return runtime_facts(
             candidates=(
-                lib("libcublas", "11", order=0),
-                lib("libcublas", "12", order=1),
+                lib("libcublas", "12", order=0, target="11"),
+                lib("libcublas", "12", order=1, target="12"),
                 lib("libcublas", package_family, origin=ORIGIN_PYTHON_PACKAGE),
             )
         )
 
-    def test_reliable_mapping_conflicting_family_is_medium(self):
-        # §19.9: the mapping is reliable (the environment's own torch-family
-        # 12 build with its package-local libcublas family 12) and the
-        # modeled ordering prefers the incompatible family 11.
-        diagnosis = RULE.evaluate(facts_with(self._mapped("12")), [])
-        assert diagnosis is not None
-        assert diagnosis.diagnosis.confidence is Confidence.MEDIUM
+    def test_matrix_1_known_torch_and_single_package_family_establish_baseline(self):
+        # §19.9: torch family 12 known and exactly one reliable
+        # package-local libcublas family 12 observed — baseline 12, and
+        # the same-name shadowing emits.
+        candidate = RULE.evaluate(facts_with(self._class_a("12")), [])
+        assert candidate is not None
+        assert candidate.diagnosis.confidence is Confidence.MEDIUM
 
-    def test_matching_mapped_family_emits_nothing(self):
+    def test_matrix_2_unknown_torch_family_is_unknown(self):
+        facts = facts_with(replace(self._class_a("12"), torch_runtime_family=None))
+        assert RULE.evaluate(facts, []) is None
+
+    def test_matrix_3_zero_package_local_families_is_unknown(self):
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcublas", "12", order=0),
-                    lib("libcublas", "12", order=1),
-                    lib("libcublas", "12", origin=ORIGIN_PYTHON_PACKAGE),
+                    lib("libcublas", "12", order=0, target="11"),
+                    lib("libcublas", "12", order=1, target="12"),
                 )
             )
         )
         assert RULE.evaluate(facts, []) is None
 
-    def test_unmappable_family_is_unknown_even_with_clear_disagreement(self):
-        # No package-local pair -> no reliable CUDA-to-SONAME mapping ->
-        # compatibility UNKNOWN, no D004 conflict claim (§19.9).
+    def test_matrix_4_multiple_disagreeing_package_families_are_unknown(self):
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcublas", "11", order=0),
-                    lib("libcublas", "12", order=1),
-                )
-            )
-        )
-        assert RULE.evaluate(facts, []) is None
-
-    def test_multiple_disagreeing_package_local_families_are_unknown(self):
-        facts = facts_with(
-            runtime_facts(
-                candidates=(
-                    lib("libcublas", "11", order=0),
-                    lib("libcublas", "12", order=1),
+                    lib("libcublas", "12", order=0, target="11"),
+                    lib("libcublas", "12", order=1, target="12"),
                     lib("libcublas", "11", origin=ORIGIN_PYTHON_PACKAGE),
                     lib("libcublas", "12", origin=ORIGIN_PYTHON_PACKAGE),
                 )
@@ -798,18 +1351,81 @@ class TestLibcublasMapping:
         )
         assert RULE.evaluate(facts, []) is None
 
-    def test_unknown_torch_family_leaves_libcublas_unmapped(self):
-        facts = facts_with(
-            replace(self._mapped("12"), torch_runtime_family=None)
-        )
-        assert RULE.evaluate(facts, []) is None
-
-    def test_unreliable_package_local_identity_leaves_mapping_unknown(self):
+    def test_matrix_5_bare_package_alias_with_reliable_target_contributes(self):
+        # A bare package alias (DERIVED_STRONG target identity, the shape
+        # the strict builder records for libcublas.so -> libcublas.so.12)
+        # contributes its target family to the baseline.
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcublas", "11", order=0),
-                    lib("libcublas", "12", order=1),
+                    lib("libcublas", "12", order=0, target="11"),
+                    lib("libcublas", "12", order=1, target="12"),
+                    lib(
+                        "libcublas",
+                        None,
+                        origin=ORIGIN_PYTHON_PACKAGE,
+                        reliability=IdentityReliability.DERIVED_STRONG,
+                        target="12",
+                    ),
+                )
+            )
+        )
+        assert RULE.evaluate(facts, []) is not None
+
+    def test_matrix_6_no_cuda_major_assumption_observed_pair_rules(self):
+        # Plan §11B: CUDA major == libcublas family is never assumed. This
+        # environment observably pairs torch family 12 with a package-local
+        # libcublas family 9 — that observed pair is the baseline.
+        conflicting = RULE.evaluate(
+            facts_with(
+                runtime_facts(
+                    candidates=(
+                        lib("libcublas", "9", order=0, target="12"),
+                        lib("libcublas", "9", order=1, target="9"),
+                        lib("libcublas", "9", origin=ORIGIN_PYTHON_PACKAGE),
+                    )
+                )
+            ),
+            [],
+        )
+        expected_preferred = RULE.evaluate(
+            facts_with(
+                runtime_facts(
+                    candidates=(
+                        lib("libcublas", "9", order=0, target="9"),
+                        lib("libcublas", "9", order=1, target="12"),
+                        lib("libcublas", "9", origin=ORIGIN_PYTHON_PACKAGE),
+                    )
+                )
+            ),
+            [],
+        )
+        assert conflicting is not None
+        assert expected_preferred is None
+
+    def test_matrix_6_wrong_family_names_are_irrelevant_under_observed_baseline(self):
+        # With the observed baseline 9, exact names claiming family 12
+        # are irrelevant lookup identities (rows Q/R semantics) even
+        # though torch runs family 12.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcublas", "12", order=0, target="11"),
+                    lib("libcublas", "12", order=1, target="12"),
+                    lib("libcublas", "9", origin=ORIGIN_PYTHON_PACKAGE),
+                )
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    def test_unreliable_package_local_identity_leaves_baseline_unknown(self):
+        # Matrix-1 negative: the only package copy's identity is not
+        # reliable enough for baseline derivation.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcublas", "12", order=0, target="11"),
+                    lib("libcublas", "12", order=1, target="12"),
                     lib(
                         "libcublas",
                         "12",
@@ -821,82 +1437,120 @@ class TestLibcublasMapping:
         )
         assert RULE.evaluate(facts, []) is None
 
-    def test_mapping_follows_the_observed_pair_not_a_numeric_assumption(self):
-        # Plan §11B: CUDA major == libcublas SONAME major is never assumed.
-        # This environment observably pairs torch family 12 with a
-        # package-local libcublas family 9 — that observed pair is the
-        # baseline, so family 12 is the conflict and family 9 the expected.
-        conflicting = RULE.evaluate(
-            facts_with(
-                runtime_facts(
-                    candidates=(
-                        lib("libcublas", "12", order=0),
-                        lib("libcublas", "9", order=1),
-                        lib("libcublas", "9", origin=ORIGIN_PYTHON_PACKAGE),
-                    )
+    def test_matching_mapped_family_emits_nothing(self):
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcublas", "12", order=0, target="12"),
+                    lib("libcublas", "12", order=1, target="12"),
+                    lib("libcublas", "12", origin=ORIGIN_PYTHON_PACKAGE),
                 )
-            ),
-            [],
+            )
         )
-        expected_preferred = RULE.evaluate(
-            facts_with(
-                runtime_facts(
-                    candidates=(
-                        lib("libcublas", "9", order=0),
-                        lib("libcublas", "12", order=1),
-                        lib("libcublas", "9", origin=ORIGIN_PYTHON_PACKAGE),
-                    )
-                )
-            ),
-            [],
-        )
-        assert conflicting is not None
-        assert expected_preferred is None
+        assert RULE.evaluate(facts, []) is None
 
 
 class TestLibcudnn:
-    def test_single_package_local_baseline_conflict_is_medium(self):
+    """Plan §33 matrix plus the §19.10 cuDNN rows."""
+
+    def _cudnn_class_a(self) -> RuntimeLibraryFacts:
+        return runtime_facts(
+            candidates=(
+                lib("libcudnn", "9", order=0, target="8"),
+                lib("libcudnn", "9", order=1, target="9"),
+            ),
+            cudnn_family="9",
+        )
+
+    def test_matrix_1_known_package_local_baseline_conflict_is_medium(self):
         # §19.10: expected environment-local cuDNN family 9; the modeled
-        # ordering prefers incompatible family 8 with the expected family 9
-        # later in the same ordering.
-        diagnosis = RULE.evaluate(
+        # lookup for the exact name libcudnn.so.9 resolves to family 8
+        # first and to family 9 later.
+        candidate = RULE.evaluate(facts_with(self._cudnn_class_a()), [])
+        assert candidate is not None
+        assert candidate.diagnosis.confidence is Confidence.MEDIUM
+
+    def test_matrix_2_unknown_baseline_is_unknown(self):
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudnn", "9", order=0, target="8"),
+                    lib("libcudnn", "9", order=1, target="9"),
+                ),
+                cudnn_family=None,
+            )
+        )
+        assert RULE.evaluate(facts, []) is None
+
+    @pytest.mark.parametrize("torch_family", [None, "11", "13"])
+    def test_matrix_3_torch_family_changes_never_alter_the_cudnn_decision(
+        self, torch_family
+    ):
+        # Plan §26 invariant, restated for exact names: holding the cuDNN
+        # baseline and candidates fixed, torch_runtime_family is inert.
+        baseline = RULE.evaluate(facts_with(self._cudnn_class_a()), [])
+        assert baseline is not None
+        variant = RULE.evaluate(
             facts_with(
                 runtime_facts(
                     candidates=(
-                        lib("libcudnn", "8", order=0),
-                        lib("libcudnn", "9", order=1),
+                        lib("libcudnn", "9", order=0, target="8"),
+                        lib("libcudnn", "9", order=1, target="9"),
                     ),
+                    torch_family=torch_family,
                     cudnn_family="9",
                 )
             ),
             [],
         )
-        assert diagnosis is not None
-        assert diagnosis.diagnosis.confidence is Confidence.MEDIUM
+        assert variant == baseline
 
-    def test_matching_candidates_emit_nothing(self):
-        # D004-N03: multiple cuDNN copies, all consistent with baseline.
+    def test_matrix_4_bare_alias_cannot_establish_lookup_relevance(self):
+        # Row E for cuDNN: bare development aliases are ineligible.
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudnn", "9", order=0),
-                    lib("libcudnn", "9", order=1),
+                    lib("libcudnn", None, order=0, target="8"),
+                    lib("libcudnn", None, order=1, target="9"),
                 ),
                 cudnn_family="9",
             )
         )
         assert RULE.evaluate(facts, []) is None
 
-    def test_zero_package_local_baselines_is_unknown(self):
-        # §19.10 negative: two cuDNN copies exist but the expected baseline
-        # cannot be derived — no conflict diagnosis, compatibility UNKNOWN.
+    def test_matrix_5_versioned_name_needs_the_baseline_family(self):
+        # Exact names claiming family 8 are irrelevant under baseline 9,
+        # however their targets diverge (rows Q/R semantics).
+        wrong_family = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudnn", "8", order=0, target="9"),
+                    lib("libcudnn", "8", order=1, target="8"),
+                ),
+                cudnn_family="9",
+            )
+        )
+        assert RULE.evaluate(wrong_family, []) is None
+        right_family = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudnn", "9", order=0, target="8"),
+                    lib("libcudnn", "9", origin=ORIGIN_PYTHON_PACKAGE, target="9"),
+                ),
+                cudnn_family="9",
+            )
+        )
+        assert RULE.evaluate(right_family, []) is not None
+
+    def test_matching_candidates_emit_nothing(self):
+        # D004-N03: multiple cuDNN copies, all consistent with baseline.
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudnn", "8", order=0),
-                    lib("libcudnn", "9", order=1),
+                    lib("libcudnn", "9", order=0, target="9"),
+                    lib("libcudnn", "9", order=1, target="9"),
                 ),
-                cudnn_family=None,
+                cudnn_family="9",
             )
         )
         assert RULE.evaluate(facts, []) is None
@@ -907,8 +1561,8 @@ class TestLibcudnn:
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudnn", "8", order=0),
-                    lib("libcudnn", "9", order=1),
+                    lib("libcudnn", "9", order=0, target="8"),
+                    lib("libcudnn", "9", order=1, target="9"),
                 ),
                 cudnn_family=None,
             )
@@ -919,7 +1573,7 @@ class TestLibcudnn:
         snapshot = snapshot_with_inventory(
             raw("libcudnn", "8", origin=ORIGIN_PYTHON_PACKAGE),
             raw("libcudnn", "9", origin=ORIGIN_PYTHON_PACKAGE),
-            raw("libcudnn", "8", origin=ORIGIN_LD_LIBRARY_PATH, order=0),
+            raw("libcudnn", "9", origin=ORIGIN_LD_LIBRARY_PATH, order=0),
             raw("libcudnn", "9", origin=ORIGIN_LD_LIBRARY_PATH, order=1),
         )
         facts = built_facts(snapshot)
@@ -927,54 +1581,21 @@ class TestLibcudnn:
         assert RULE.evaluate(facts, []) is None
 
     def test_torch_cuda_family_is_never_a_cudnn_baseline(self):
-        # Semantics §23.8 / plan §26: the conflicting cuDNN family "12"
+        # Semantics §23.8 / plan §26: the conflicting cuDNN target family
         # equals the torch runtime family here — if the rule wrongly
-        # compared cuDNN against torch.version.cuda it would see a match
-        # and stay silent instead of diagnosing the family-8-vs-9 conflict.
+        # compared cuDNN against torch it would treat the earliest
+        # target as expected and stay silent.
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudnn", "12", order=0),
-                    lib("libcudnn", "9", order=1),
+                    lib("libcudnn", "9", order=0, target="12"),
+                    lib("libcudnn", "9", order=1, target="9"),
                 ),
+                torch_family="12",
                 cudnn_family="9",
             )
         )
         assert RULE.evaluate(facts, []) is not None
-
-    @pytest.mark.parametrize("torch_family", [None, "11", "13"])
-    def test_cudnn_decision_independent_of_torch_runtime_family(
-        self, torch_family
-    ):
-        # Plan §26 invariant: holding the cuDNN baseline and candidates
-        # fixed, changing torch_runtime_family changes nothing.
-        common = {
-            "runtime": runtime_facts(
-                candidates=(
-                    lib("libcudnn", "8", order=0),
-                    lib("libcudnn", "9", order=1),
-                ),
-                torch_family=torch_family,
-                cudnn_family="9",
-            )
-        }
-        baseline = RULE.evaluate(facts_with(**common), [])  # type: ignore[arg-type]
-        assert baseline is not None
-        for other in (None, "11", "13"):
-            variant = RULE.evaluate(
-                facts_with(
-                    runtime_facts(
-                        candidates=(
-                            lib("libcudnn", "8", order=0),
-                            lib("libcudnn", "9", order=1),
-                        ),
-                        torch_family=other,
-                        cudnn_family="9",
-                    )
-                ),
-                [],
-            )
-            assert variant == baseline
 
 
 class TestScanIncomplete:
@@ -991,14 +1612,14 @@ class TestScanIncomplete:
         assert RULE.evaluate(facts, []) is None
 
     def test_observed_conflict_still_emits_under_incomplete_scan(self):
-        # An already-modeled conflict is established inside the observed
-        # ordering; unscanned roots cannot change LDP-internal precedence,
-        # so the frozen MEDIUM stands (no invented confidence cap).
+        # An already-established Class A stays MEDIUM; unscanned roots
+        # cannot change LDP-internal precedence (rows A-S apply to what
+        # is observed; scan_incomplete never caps it).
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", order=0),
-                    lib("libcudart", "12", order=1),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=1, target="12"),
                 ),
                 scan_incomplete=True,
             )
@@ -1013,7 +1634,7 @@ class TestScanIncomplete:
         # declared healthy (a None result is silence, not an all-clear).
         facts = facts_with(
             runtime_facts(
-                candidates=(lib("libcudart", "12", order=0),),
+                candidates=(lib("libcudart", "12", order=0, target="12"),),
                 scan_incomplete=True,
             )
         )
@@ -1025,10 +1646,10 @@ class TestAggregation:
         return facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", order=0),
-                    lib("libcudart", "12", order=1),
-                    lib("libcudnn", "8", order=0),
-                    lib("libcudnn", "9", order=1),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=1, target="12"),
+                    lib("libcudnn", "9", order=0, target="8"),
+                    lib("libcudnn", "9", order=1, target="9"),
                 ),
                 cudnn_family="9",
             )
@@ -1056,25 +1677,32 @@ class TestAggregation:
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", order=0),
-                    lib("libcudart", "12", order=1),
-                    lib("libcublas", "11", order=0),
-                    lib("libcublas", "12", order=1),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=1, target="12"),
+                    lib("libcublas", "12", order=0, target="11"),
+                    lib("libcublas", "12", order=1, target="12"),
                     lib("libcublas", "12", origin=ORIGIN_PYTHON_PACKAGE),
-                    lib("libcudnn", "8", order=0),
-                    lib("libcudnn", "9", order=1),
+                    lib("libcudnn", "9", order=0, target="8"),
+                    lib("libcudnn", "9", order=1, target="9"),
                 ),
                 cudnn_family="9",
             )
         )
         candidate = RULE.evaluate(facts, [])
         assert candidate is not None
+        assert len(candidate.diagnosis.evidence) == 7  # 3 families x 2 + relation
         families = {
             item.key.rsplit("_", 1)[0]
             for item in candidate.diagnosis.evidence
             if item.key.endswith("_conflicting")
         }
         assert families == {"libcudart", "libcublas", "libcudnn"}
+        sources = {item.key: item.source for item in candidate.diagnosis.evidence}
+        # Only the libcudart baseline item is torch-derived (§11A); the
+        # libcublas/libcudnn expected items stay runtime-library facts.
+        assert sources["libcudart_expected"] == "torch"
+        assert sources["libcublas_expected"] == "runtime_libraries"
+        assert sources["libcudnn_expected"] == "runtime_libraries"
 
     def test_duplicate_evidence_never_accumulates(self):
         baseline = RULE.evaluate(conflict_facts(), [])
@@ -1082,9 +1710,9 @@ class TestAggregation:
             facts_with(
                 runtime_facts(
                     candidates=(
-                        lib("libcudart", "11", order=0),
-                        lib("libcudart", "12", order=1),
-                        lib("libcudart", "12", order=1),
+                        lib("libcudart", "12", order=0, target="11"),
+                        lib("libcudart", "12", order=1, target="12"),
+                        lib("libcudart", "12", order=1, target="12"),
                     )
                 )
             ),
@@ -1093,41 +1721,129 @@ class TestAggregation:
         assert duplicated == baseline
         assert len(duplicated.diagnosis.evidence) == len(baseline.diagnosis.evidence)
 
+    def _representative_name(self, facts: DiagnosisFacts) -> str:
+        candidate = RULE.evaluate(facts, [])
+        assert candidate is not None
+        conflicting = next(
+            item.value
+            for item in candidate.diagnosis.evidence
+            if item.key == "libcudart_conflicting"
+        )
+        return conflicting
 
-class TestUnknownConservative:
-    def test_known_versus_unknown_is_never_mismatch(self):
-        # §13: an unknown-identity later candidate cannot serve as the
-        # expected copy, and an unknown preferred candidate blocks emission.
-        unknown_expected = facts_with(
+    def test_class_a_is_the_representative_over_class_b(self):
+        # Plan §17 selection rule 1: libcudart.so.12 is Class-B-only
+        # here (no later LDP provider); libcudart.so.12.0 is Class A —
+        # the Class-A finding represents the family.
+        facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", order=0),
-                    lib("libcudart", "12", order=1, reliability=IdentityReliability.UNKNOWN),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target="12"),
+                    lib("libcudart", "12", order=1, target="11", name="libcudart.so.12.0"),
+                    lib("libcudart", "12", order=2, target="12", name="libcudart.so.12.0"),
                 )
             )
         )
-        assert RULE.evaluate(unknown_expected, []) is None
+        conflicting = self._representative_name(facts)
+        assert "load name libcudart.so.12.0 (" in conflicting
+        assert "load name libcudart.so.12 (" not in conflicting
 
+    def test_lower_modeled_order_wins_between_two_class_a_names(self):
+        # Plan §17 selection rule 2: libcudart.so.12.0 conflicts at entry
+        # 0; libcudart.so.12 conflicts at entry 1 — both Class A.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0, target="11", name="libcudart.so.12.0"),
+                    lib("libcudart", "12", order=3, target="12", name="libcudart.so.12.0"),
+                    lib("libcudart", "12", order=1, target="11"),
+                    lib("libcudart", "12", order=2, target="12"),
+                )
+            )
+        )
+        conflicting = self._representative_name(facts)
+        assert "load name libcudart.so.12.0 (" in conflicting
+        assert "load name libcudart.so.12 (" not in conflicting
+
+    def test_lexical_name_breaks_order_ties(self):
+        # Plan §17 selection rule 3: both Class A with the conflict at
+        # entry 0; the lexically smaller exact name represents.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0, target="11", name="libcudart.so.12.0"),
+                    lib("libcudart", "12", order=2, target="12", name="libcudart.so.12.0"),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=2, target="12"),
+                )
+            )
+        )
+        conflicting = self._representative_name(facts)
+        assert "load name libcudart.so.12 (" in conflicting
+        assert "load name libcudart.so.12.0 (" not in conflicting
+
+    def test_selection_is_presentation_only_and_order_independent(self):
+        # Input ordering never changes the representative (or existence).
+        ordered = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0, target="11", name="libcudart.so.12.0"),
+                    lib("libcudart", "12", order=2, target="12", name="libcudart.so.12.0"),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target="12"),
+                )
+            )
+        )
+        shuffled = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target="12"),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=2, target="12", name="libcudart.so.12.0"),
+                    lib("libcudart", "12", order=0, target="11", name="libcudart.so.12.0"),
+                )
+            )
+        )
+        assert RULE.evaluate(ordered, []) == RULE.evaluate(shuffled, [])
+
+
+class TestUnknownConservative:
     @pytest.mark.parametrize(
-        ("family", "cudnn"),
-        [("libcudart", None), ("libcublas", None), ("libcudnn", None)],
+        "runtime",
+        [
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=1, target="12"),
+                ),
+                torch_family=None,
+            ),
+            runtime_facts(
+                candidates=(
+                    lib("libcublas", "12", order=0, target="11"),
+                    lib("libcublas", "12", order=1, target="12"),
+                ),
+                torch_family=None,
+            ),
+            runtime_facts(
+                candidates=(
+                    lib("libcudnn", "9", order=0, target="8"),
+                    lib("libcudnn", "9", order=1, target="9"),
+                ),
+                cudnn_family=None,
+            ),
+        ],
         ids=["cudart-baseline", "cublas-baseline", "cudnn-baseline"],
     )
-    def test_missing_baseline_is_not_a_conflict(self, family, cudnn):
-        candidates = (
-            lib(family, "11", order=0),
-            lib(family, "12", order=1),
-        )
-        facts = facts_with(
-            runtime_facts(candidates=candidates, torch_family=None, cudnn_family=cudnn)
-        )
-        assert RULE.evaluate(facts, []) is None
+    def test_missing_baseline_is_not_a_conflict(self, runtime):
+        assert RULE.evaluate(facts_with(runtime), []) is None
 
     def test_partial_facts_degrade_to_silence(self):
         # Baseline present but nothing modeled at all.
         facts = facts_with(
             runtime_facts(
-                candidates=(lib("libcudart", "11", origin=ORIGIN_LDCONFIG),),
+                candidates=(lib("libcudart", "11", origin=ORIGIN_LDCONFIG, target="11"),),
                 cudnn_family="9",
             )
         )
@@ -1140,21 +1856,21 @@ class TestStaticConfidenceCeiling:
         [
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", order=0),
-                    lib("libcudart", "12", order=1),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=1, target="12"),
                 )
             ),
             runtime_facts(
                 candidates=(
-                    lib("libcublas", "11", order=0),
-                    lib("libcublas", "12", order=1),
+                    lib("libcublas", "12", order=0, target="11"),
+                    lib("libcublas", "12", order=1, target="12"),
                     lib("libcublas", "12", origin=ORIGIN_PYTHON_PACKAGE),
                 )
             ),
             runtime_facts(
                 candidates=(
-                    lib("libcudnn", "8", order=0),
-                    lib("libcudnn", "9", order=1),
+                    lib("libcudnn", "9", order=0, target="8"),
+                    lib("libcudnn", "9", order=1, target="9"),
                 ),
                 cudnn_family="9",
             ),
@@ -1163,8 +1879,9 @@ class TestStaticConfidenceCeiling:
     )
     def test_static_inventory_alone_never_reaches_high(self, runtime):
         # Plan §23: pin the contract directly — the strongest possible
-        # static evidence (all-direct identities, clear major conflict,
-        # expected copy modeled later) still yields MEDIUM, never HIGH.
+        # static evidence (all-direct identities, clear same-name
+        # shadowing, expected provider modeled later) still yields
+        # MEDIUM, never HIGH.
         candidate = RULE.evaluate(facts_with(runtime), [])
         assert candidate is not None
         assert candidate.diagnosis.confidence is Confidence.MEDIUM
@@ -1177,9 +1894,9 @@ class TestStaticConfidenceCeiling:
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", origin=ORIGIN_LDCONFIG),
-                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE),
-                    lib("libcudart", "11", origin=ORIGIN_CONDA_PREFIX),
+                    lib("libcudart", "11", origin=ORIGIN_LDCONFIG, target="11"),
+                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target="12"),
+                    lib("libcudart", "11", origin=ORIGIN_CONDA_PREFIX, target="11"),
                 )
             )
         )
@@ -1187,27 +1904,40 @@ class TestStaticConfidenceCeiling:
 
 
 class TestRpathNonInference:
-    def test_rpath_dependent_scenario_stays_unknown(self):
-        # Plan §24: the only way to choose between the LDP conflicting copy
-        # and the package-local expected copy is ELF RPATH/RUNPATH
-        # knowledge — Phase 8 must not upgrade it into a confident
-        # diagnosis.
-        facts = facts_with(
-            runtime_facts(
-                candidates=(
-                    lib("libcudart", "11", order=0),
-                    lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE),
-                    lib("libcublas", "11", order=0),
-                    lib("libcublas", "12", origin=ORIGIN_PYTHON_PACKAGE),
+    def test_cross_origin_emission_stays_conditional_never_a_winner(self):
+        # Row J: deciding which origin the loader would prefer needs
+        # RPATH/RUNPATH knowledge. Revision 3 still permits the frozen
+        # Class-B conditional static risk for this shape — the assertion
+        # is that the output never upgrades it into a winner claim.
+        candidate = RULE.evaluate(
+            facts_with(
+                runtime_facts(
+                    candidates=(
+                        lib("libcudart", "12", order=0, target="11"),
+                        lib("libcublas", "12", order=0, target="11"),
+                        lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target="12"),
+                        lib("libcublas", "12", origin=ORIGIN_PYTHON_PACKAGE, target="12"),
+                    )
                 )
-            )
+            ),
+            [],
         )
-        assert RULE.evaluate(facts, []) is None
+        assert candidate is not None
+        claimed = " ".join(
+            [candidate.diagnosis.summary]
+            + [item.value for item in candidate.diagnosis.evidence]
+            + [f"{item.scope} {item.status}" for item in candidate.diagnosis.impact]
+        )
+        # The frozen §28 remediation prose describes the modeled ordering
+        # only; the environmental claims are what must stay conditional.
+        for forbidden in ("wins", "winner", "will load", "definitely loads", "RPATH", "RUNPATH"):
+            assert forbidden not in claimed, forbidden
 
     @pytest.mark.parametrize("module", [rules_base, d004_module], ids=["base", "d004"])
     def test_imports_no_host_probes_or_collector_surfaces(self, module):
-        # Structural purity (plan §24/§27): resolving loader ambiguity with
-        # host inspection would require importing one of these.
+        # Structural purity (plan §24/§27/§34.11): resolving loader
+        # ambiguity with host inspection would require importing one of
+        # these. D004 is pure over DiagnosisFacts (plan §35).
         tree = ast.parse(Path(module.__file__).read_text())
         imported: set[str] = set()
         for node in ast.walk(tree):
@@ -1223,19 +1953,27 @@ class TestRpathNonInference:
             assert name != "cuda_doctor.core.models", name
 
     def test_source_names_no_collector_types_or_loader_probes(self):
-        # The rule must not even reference the pre-normalization surface or
-        # any forbidden loader-inspection tooling by name.
+        # Plan §22/§34.11: the rule must not even reference the
+        # pre-normalization surface, the fact builder, or any forbidden
+        # loader-inspection tooling by name.
         source = Path(d004_module.__file__).read_text()
         for forbidden in (
             "EnvironmentSnapshot",
             "RuntimeLibraryInventory",
+            "DiagnosisFactBuilder",
             "ldconfig -p",
             "readelf",
             "objdump",
+            "ldd",
             "LD_DEBUG",
             "/proc/",
             "dlopen",
             "ctypes",
+            "DT_NEEDED",
+            "DT_SONAME",
+            "RPATH",
+            "RUNPATH",
+            "SONAME",
         ):
             assert forbidden not in source, forbidden
 
@@ -1249,8 +1987,8 @@ class TestPurityAndDeterminism:
         shuffled = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "12", order=1),
-                    lib("libcudart", "11", order=0),
+                    lib("libcudart", "12", order=1, target="12"),
+                    lib("libcudart", "12", order=0, target="11"),
                 )
             )
         )
@@ -1273,8 +2011,8 @@ class TestD001D002Interaction:
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", order=0),
-                    lib("libcudart", "12", order=1),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=1, target="12"),
                 )
             ),
             selectors=(
@@ -1292,8 +2030,8 @@ class TestD001D002Interaction:
         facts = facts_with(
             runtime_facts(
                 candidates=(
-                    lib("libcudart", "11", order=0),
-                    lib("libcudart", "12", order=1),
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=1, target="12"),
                 )
             ),
             reference=ref(version="11.8"),
@@ -1306,8 +2044,8 @@ class TestD001D002Interaction:
 class TestImportFailure:
     def test_import_failure_does_not_block_independent_evidence(self):
         # §19.13: D004 may emit on its own evidence — here the cuDNN
-        # conflict, whose baseline never depends on torch — even when
-        # PyTorch cannot be imported at all.
+        # Class-A conflict, whose baseline never depends on torch — even
+        # when PyTorch cannot be imported at all.
         snapshot = base_snapshot()
         snapshot.pytorch = replace(
             snapshot.pytorch,
@@ -1318,8 +2056,20 @@ class TestImportFailure:
         )
         snapshot.runtime_libraries = RuntimeLibraryInventory(
             candidates=[
-                raw("libcudnn", "8", origin=ORIGIN_LD_LIBRARY_PATH, order=0),
-                raw("libcudnn", "9", origin=ORIGIN_LD_LIBRARY_PATH, order=1),
+                raw(
+                    "libcudnn",
+                    "9",
+                    origin=ORIGIN_LD_LIBRARY_PATH,
+                    order=0,
+                    canonical_path="/opt/inventory/libcudnn.so.8.0.5",
+                ),
+                raw(
+                    "libcudnn",
+                    "9",
+                    origin=ORIGIN_LD_LIBRARY_PATH,
+                    order=1,
+                    canonical_path="/opt/inventory/libcudnn.so.9.1",
+                ),
                 raw("libcudnn", "9", origin=ORIGIN_PYTHON_PACKAGE),
             ]
         )
@@ -1342,44 +2092,111 @@ class TestCandidateOutputContent:
         assert diagnosis.code == "D004"
         assert diagnosis.title == "CUDA runtime library conflict"
 
-    def test_summary_uses_modeled_order_wording_only(self):
-        # Semantics §23.7: MEDIUM conclusions are phrased in terms of the
-        # modeled candidates — never as proof of which object will load.
+    def test_summary_uses_modeled_lookup_wording_only(self):
+        # Semantics §23.7 / plan §25: MEDIUM conclusions are phrased in
+        # terms of the modeled same-name lookup — never as proof of which
+        # object will load, and never as a cross-origin winner claim.
         summary = conflict_diagnosis().summary
-        assert "modeled LD_LIBRARY_PATH search order" in summary
+        assert "modeled LD_LIBRARY_PATH" in summary
         assert "not observed" in summary
-        for forbidden in ("will load", "is loaded", "definitely loads"):
+        for forbidden in ("will load", "is loaded", "definitely loads", "wins", "winner"):
             assert forbidden not in summary, forbidden
 
-    def test_evidence_bounded_and_ordered(self):
+    def test_summary_correct_for_class_b(self):
+        # The Class-B clause must describe the corroborated-alias
+        # relation, not same-name shadowing.
+        summary = RULE.evaluate(class_b_facts(), []).diagnosis.summary
+        assert "independently observed current-Python compatible provider" in summary
+        assert "shadowed" not in summary
+        assert "not observed" in summary
+
+    def test_evidence_bounded_and_ordered_class_a(self):
+        # Amendment §20 frozen evidence formats for Class A.
         assert conflict_diagnosis().evidence == [
             EvidenceItem(
                 key="libcudart_conflicting",
-                value="family 11 at LD_LIBRARY_PATH entry 0 (direct)",
+                value=(
+                    "observed versioned load name libcudart.so.12 (claims family 12) "
+                    "at LD_LIBRARY_PATH entry 0 resolves to family 11 (derived "
+                    "strongly from its symlink target)"
+                ),
                 source="runtime_libraries",
             ),
-            EvidenceItem(key="libcudart_expected", value="family 12", source="torch"),
+            EvidenceItem(
+                key="libcudart_expected",
+                value="family 12 provider of libcudart.so.12 shadowed at a later entry",
+                source="torch",
+            ),
             EvidenceItem(
                 key="static_relation",
-                value="conflicting candidate preferred within the modeled search order",
+                value=(
+                    "same-name shadowing / misleading alias on an observed "
+                    "versioned load name within the modeled LD_LIBRARY_PATH ordering"
+                ),
+                source="compatibility",
+            ),
+        ]
+
+    def test_evidence_bounded_and_ordered_class_b(self):
+        # Amendment §20 frozen evidence formats for Class B.
+        diagnosis = RULE.evaluate(class_b_facts(), []).diagnosis
+        assert diagnosis.evidence == [
+            EvidenceItem(
+                key="libcudart_conflicting",
+                value=(
+                    "observed versioned load name libcudart.so.12 (claims family 12) "
+                    "at LD_LIBRARY_PATH entry 0 resolves to family 11 (derived "
+                    "strongly from its symlink target)"
+                ),
+                source="runtime_libraries",
+            ),
+            EvidenceItem(
+                key="libcudart_expected",
+                value="family 12 package-local provider of libcudart.so.12",
+                source="torch",
+            ),
+            EvidenceItem(
+                key="static_relation",
+                value=(
+                    "same-name shadowing / misleading alias on an observed "
+                    "versioned load name within the modeled LD_LIBRARY_PATH ordering"
+                ),
                 source="compatibility",
             ),
         ]
 
     def test_evidence_contains_no_path_like_content(self):
+        # The frozen §20 static_relation value contains one "/" as a
+        # prose separator ("shadowing / misleading alias"); every other
+        # slash anywhere in evidence would be path-like content.
         for item in conflict_diagnosis().evidence:
-            assert "/" not in item.value
+            if item.key == "static_relation":
+                assert "/" not in item.value.replace("shadowing / misleading", "")
+            else:
+                assert "/" not in item.value
             assert "$" not in item.value
 
+    def test_evidence_never_presents_reliability(self):
+        # Plan §26: reliability is not conflict evidence.
+        for item in conflict_diagnosis().evidence:
+            assert "reliability" not in item.value.lower()
+            assert "(direct)" not in item.value
+            assert "derived strongly from" in item.value or item.key != "libcudart_conflicting"
+
     def test_frozen_impact(self):
+        # Plan §27: alias resolution at risk; PyTorch initialization may
+        # be affected conditionally; the loaded object is not observed.
         assert conflict_diagnosis().impact == [
             ImpactItem(
                 scope="CUDA runtime library resolution",
-                status="conflicting family preferred within the modeled search order",
+                status=(
+                    "alias resolution at risk under the modeled or "
+                    "conditional LD_LIBRARY_PATH semantics"
+                ),
             ),
             ImpactItem(
                 scope="PyTorch CUDA initialization",
-                status="at risk if the modeled resolution applies",
+                status="may be affected if the modeled or conditional resolution applies",
             ),
             ImpactItem(
                 scope="actually loaded library",
@@ -1388,8 +2205,9 @@ class TestCandidateOutputContent:
         ]
 
     def test_remediation_safe_guidance_without_commands(self):
-        # §19.15: remove/reorder the conflicting entry, start a clean
-        # shell, re-run cuda-doctor — all SAFE, nothing executed.
+        # §19.15 (frozen; amendment OQ-3 — remediation untouched by R2):
+        # remove/reorder the conflicting entry, start a clean shell,
+        # re-run cuda-doctor — all SAFE, nothing executed.
         steps = conflict_diagnosis().remediation
         assert 2 <= len(steps) <= 5
         for step in steps:
@@ -1423,8 +2241,8 @@ class TestCandidateOutputContent:
             assert forbidden not in rendered, forbidden
 
     def test_frozen_verification_commands(self):
-        # §19.16 minimum, display-only; Linux-only rule so no platform
-        # keying and no loaded-object inspection.
+        # §19.16 minimum (plan §29), display-only; Linux-only rule so no
+        # platform keying and no loaded-object inspection.
         assert conflict_diagnosis().verification == [
             "echo $LD_LIBRARY_PATH",
             "cuda-doctor",
@@ -1440,7 +2258,7 @@ class TestCandidateOutputContent:
 
     def test_candidate_is_risk_only_without_causal_parents(self):
         # Static analysis alone: no observed failure is explained here —
-        # the D003 causal chain is Phase 9/10 wiring (plan §16).
+        # the D003 causal chain is Phase 9/10 wiring (plan §16/§37).
         candidate = RULE.evaluate(conflict_facts(), [])
         assert candidate.risk_only is True
         assert candidate.explains_active_failure is False
@@ -1462,6 +2280,50 @@ class TestCandidateOutputContent:
         assert diagnosis.severity is Severity.WARNING
 
 
+class TestMisattribution:
+    """Amendment §21 mandatory regression: the conflict is attributed to
+    the divergent alias, never to the real versioned file beside it."""
+
+    def _scenario(self) -> tuple[RuntimeLibraryCandidateFact, ...]:
+        # Entry 0: a real family-11 file under its own name (healthy).
+        # Entry 1: a misleading family-12 alias resolving to family 9.
+        # Package: an independent family-12 provider of the same alias.
+        return (
+            lib("libcudart", "11", order=0, target="11"),
+            lib("libcudart", "12", order=1, target="9"),
+            lib("libcudart", "12", origin=ORIGIN_PYTHON_PACKAGE, target="12"),
+        )
+
+    def test_conflict_attributed_to_the_divergent_alias(self):
+        candidate = RULE.evaluate(facts_with(runtime_facts(self._scenario())), [])
+        assert candidate is not None
+        conflicting = [
+            item.value
+            for item in candidate.diagnosis.evidence
+            if item.key == "libcudart_conflicting"
+        ]
+        assert conflicting == [
+            "observed versioned load name libcudart.so.12 (claims family 12) "
+            "at LD_LIBRARY_PATH entry 1 resolves to family 9 (derived "
+            "strongly from its symlink target)"
+        ]
+        expected = [
+            item.value
+            for item in candidate.diagnosis.evidence
+            if item.key == "libcudart_expected"
+        ]
+        # Entry 1 is never cited as expected family-12 content; the
+        # package-local provider is.
+        assert expected == ["family 12 package-local provider of libcudart.so.12"]
+        rendered = str(asdict(candidate.diagnosis))
+        assert "family 11 at" not in rendered  # the real file is never the conflict
+
+    def test_without_corroboration_the_same_scenario_stays_unknown(self):
+        candidates = self._scenario()[:2]
+        facts = facts_with(runtime_facts(candidates))
+        assert RULE.evaluate(facts, []) is None
+
+
 class TestEvidencePrivacy:
     def test_secret_inventory_path_never_reaches_the_candidate(self):
         # Plan §18: a secret-looking raw candidate path in the Phase-3
@@ -1470,10 +2332,12 @@ class TestEvidencePrivacy:
         snapshot = snapshot_with_inventory(
             raw(
                 "libcudart",
-                "11",
+                "12",
                 origin=ORIGIN_LD_LIBRARY_PATH,
                 order=0,
-                path="/home/secretuser/legacy/libcudart.so.11",
+                path="/home/secretuser/legacy/libcudart.so.12",
+                canonical_path="/home/secretuser/legacy/libcudart.so.11.8.89",
+                version_source=VERSION_SOURCE_SYMLINK_TARGET,
             ),
             raw(
                 "libcudart",
@@ -1481,6 +2345,7 @@ class TestEvidencePrivacy:
                 origin=ORIGIN_LD_LIBRARY_PATH,
                 order=1,
                 path="/home/secretuser/expected/libcudart.so.12",
+                canonical_path="/home/secretuser/expected/libcudart.so.12",
             ),
         )
         facts = built_facts(snapshot)
@@ -1494,14 +2359,18 @@ class TestEvidencePrivacy:
 
 
 class TestBuilderEndToEnd:
-    def test_19_8_example_through_the_fact_builder(self):
+    def test_row_c_through_the_fact_builder(self):
+        # Real symlink shape: entry 0's libcudart.so.12 is a symlink to
+        # the family-11 file; entry 1's is a regular family-12 file.
         snapshot = snapshot_with_inventory(
             raw(
                 "libcudart",
-                "11",
+                "12",
                 origin=ORIGIN_LD_LIBRARY_PATH,
                 order=0,
-                path="/legacy/cuda-11/lib64/libcudart.so.11",
+                path="/legacy/cuda-11/lib64/libcudart.so.12",
+                canonical_path="/legacy/cuda-11/lib64/libcudart.so.11.8.89",
+                version_source=VERSION_SOURCE_SYMLINK_TARGET,
             ),
             raw(
                 "libcudart",
@@ -1509,6 +2378,7 @@ class TestBuilderEndToEnd:
                 origin=ORIGIN_LD_LIBRARY_PATH,
                 order=1,
                 path="/expected/cuda-12/lib64/libcudart.so.12",
+                canonical_path="/expected/cuda-12/lib64/libcudart.so.12",
             ),
         )
         facts = built_facts(snapshot)
@@ -1517,16 +2387,44 @@ class TestBuilderEndToEnd:
         assert candidate is not None
         assert candidate.diagnosis.confidence is Confidence.MEDIUM
 
-    def test_symlink_derived_identity_is_still_reliable(self):
-        # R1 shape migration: a bare observed name carries no family claim
-        # (``load_name_family_version`` None); the identity comes from the
-        # reliably resolved canonical target (DERIVED_STRONG), which the
-        # transitional rule still consumes through its filename-first /
-        # target-second compatibility mapping.
+    def test_row_d_exact_tail_retained_through_the_fact_builder(self):
+        # CUDA-11-style: the exact observed name libcudart.so.11.0 (a
+        # symlink to the family-10 file) never normalizes to .so.11.
         snapshot = snapshot_with_inventory(
             raw(
                 "libcudart",
-                "11",
+                "11.0",
+                origin=ORIGIN_LD_LIBRARY_PATH,
+                order=0,
+                path="/legacy/libcudart.so.11.0",
+                canonical_path="/legacy/libcudart.so.10.2",
+            ),
+            raw(
+                "libcudart",
+                "11.0",
+                origin=ORIGIN_LD_LIBRARY_PATH,
+                order=1,
+                path="/expected/libcudart.so.11.0",
+                canonical_path="/expected/libcudart.so.11.0",
+            ),
+            cuda_version="11.8",
+        )
+        facts = built_facts(snapshot)
+        assert facts.runtime_libraries.torch_runtime_family == "11"
+        names = [c.load_name for c in facts.runtime_libraries.candidates]
+        assert "libcudart.so.11.0" in names
+        assert RULE.evaluate(facts, []) is not None
+
+    def test_bare_alias_target_identity_creates_no_lookup_relevance(self):
+        # R2 flip of the old symlink-derived positive (amendment §21):
+        # a bare observed name (load_name_family_version None,
+        # DERIVED_STRONG target identity) is not an eligible versioned
+        # lookup name — rows E. The fact-field assertions the old test
+        # made are retained.
+        snapshot = snapshot_with_inventory(
+            raw(
+                "libcudart",
+                None,
                 origin=ORIGIN_LD_LIBRARY_PATH,
                 order=0,
                 path="/opt/inventory/libcudart.so",
@@ -1538,6 +2436,7 @@ class TestBuilderEndToEnd:
                 "12",
                 origin=ORIGIN_LD_LIBRARY_PATH,
                 order=1,
+                canonical_path="/opt/inventory/libcudart.so.12",
             ),
         )
         facts = built_facts(snapshot)
@@ -1546,21 +2445,23 @@ class TestBuilderEndToEnd:
         assert preferred.load_name_family_version is None
         assert preferred.target_family_version == "11"
         assert preferred.reliability is IdentityReliability.DERIVED_STRONG
-        assert RULE.evaluate(facts, []) is not None
+        assert RULE.evaluate(facts, []) is None
 
     def test_scan_errors_mark_incomplete_without_blocking_the_conflict(self):
         snapshot = snapshot_with_inventory(
             raw(
                 "libcudart",
-                "11",
+                "12",
                 origin=ORIGIN_LD_LIBRARY_PATH,
                 order=0,
+                canonical_path="/opt/inventory/libcudart.so.11.8.89",
             ),
             raw(
                 "libcudart",
                 "12",
                 origin=ORIGIN_LD_LIBRARY_PATH,
                 order=1,
+                canonical_path="/opt/inventory/libcudart.so.12",
             ),
             scan_errors={"/root/unreadable": "permission denied"},
         )
@@ -1571,23 +2472,120 @@ class TestBuilderEndToEnd:
 
 class TestNoEngineIntegration:
     def test_engine_still_emits_no_diagnoses(self):
-        # Plan §28: the rule fires on the built facts, but the engine
+        # Plan §28/§38: the rule fires on the built facts, but the engine
         # neither runs it nor populates DiagnosisResult.diagnoses.
         snapshot = snapshot_with_inventory(
             raw(
                 "libcudart",
-                "11",
+                "12",
                 origin=ORIGIN_LD_LIBRARY_PATH,
                 order=0,
+                canonical_path="/opt/inventory/libcudart.so.11.8.89",
             ),
             raw(
                 "libcudart",
                 "12",
                 origin=ORIGIN_LD_LIBRARY_PATH,
                 order=1,
+                canonical_path="/opt/inventory/libcudart.so.12",
             ),
         )
         result = DiagnosisEngine().run(snapshot)
         assert result.diagnoses == []
         assert result.diagnosis_errors == {}
         assert RULE.evaluate(built_facts(snapshot), []) is not None
+
+
+class TestStructuralContract:
+    """R2 plan §34 binding structural tests over the rewritten rule.
+
+    Items 7 (rows Q/R/G), 10 (imports) and 11 (source names) are pinned
+    behaviorally in TestTruthTableRows / TestRpathNonInference; the
+    remaining items are pinned here by AST/source inspection.
+    """
+
+    def _source(self) -> str:
+        return Path(d004_module.__file__).read_text()
+
+    def _tree(self) -> ast.Module:
+        return ast.parse(self._source())
+
+    def test_legacy_bridge_is_gone(self):
+        # §34.1: the transitional R1 bridge no longer exists.
+        assert not hasattr(d004_module, "_legacy_family_version")
+
+    def test_no_transitional_r1_or_legacy_bridge_in_production_source(self):
+        # §34.2: no production occurrence survives anywhere under src.
+        src_root = Path(d004_module.__file__).parents[3]
+        assert src_root.name == "src"
+        for path in sorted(src_root.rglob("*.py")):
+            text = path.read_text()
+            assert "_legacy_family_version" not in text, path
+            assert "TRANSITIONAL R1" not in text, path
+
+    def test_no_lookup_name_is_constructed_from_family_ingredients(self):
+        # §34.3: no string constant in the rule contains the
+        # shared-object separator, so no exact name can be assembled from
+        # family and version ingredients (also amendment §21 test 1 — no
+        # synthesized libcudart.so.<major>).
+        for node in ast.walk(self._tree()):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                assert ".so" not in node.value, node.value
+
+    def test_class_a_groups_on_exact_load_name_equality(self):
+        # §34.4: same-name grouping is string equality over the observed
+        # exact name — never family arithmetic or prefix matching (row S
+        # and the .11.0-vs-.11 behavioral pins).
+        assert "candidate.load_name == name" in self._source()
+
+    def test_relevance_gate_is_shared_by_both_classes(self):
+        # §34.5/§34.6: one relevance guard — the observed name's claimed
+        # family must equal the baseline — admits both Class A and
+        # Class B (behavioral pins: rows Q and R).
+        assert "load_name_family_version != baseline" in self._source()
+
+    def test_class_b_requires_exact_same_name_package_corroboration(self):
+        # §34.7: the corroboration predicate is exact-name equality plus
+        # a baseline-compatible package-local target.
+        assert "package_candidate.load_name == name" in self._source()
+
+    def test_conflict_target_identity_comes_from_target_family_version(self):
+        # §34.8: every finding's conflicting family is the earliest
+        # provider's target_family_version (behavioral pins: row D and
+        # the misattribution scenario; never a load-name fallback).
+        assert "conflicting_target_family=preferred.target_family_version" in self._source()
+
+    def test_reliability_read_only_in_baseline_identity(self):
+        # §34.9: candidate.reliability may be read ONLY inside
+        # _baseline_identity (package-local family-baseline derivation).
+        offenders = [
+            function.name
+            for function in ast.walk(self._tree())
+            if isinstance(function, ast.FunctionDef)
+            and function.name != "_baseline_identity"
+            and any(
+                isinstance(node, ast.Attribute) and node.attr == "reliability"
+                for node in ast.walk(function)
+            )
+        ]
+        assert offenders == []
+
+    def test_evaluate_returns_at_most_one_candidate(self):
+        # §34.12: one D004 candidate maximum — the return type is a
+        # single optional candidate, and multi-family facts yield one.
+        multi = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=1, target="12"),
+                    lib("libcudnn", "9", order=0, target="8"),
+                    lib("libcudnn", "9", order=1, target="9"),
+                ),
+                cudnn_family="9",
+            )
+        )
+        result = RULE.evaluate(multi, [])
+        assert result is None or isinstance(result, type(RULE.evaluate(conflict_facts(), [])))
+        single = RULE.evaluate(conflict_facts(), [])
+        assert single is not None
+        assert isinstance(single.diagnosis, Diagnosis)

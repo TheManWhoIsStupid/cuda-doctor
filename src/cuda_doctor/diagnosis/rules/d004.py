@@ -139,7 +139,7 @@ class D004RuntimeLibraryConflict:
             role=None,
             evidence=_evidence(findings),
             impact=_impact(),
-            remediation=_remediation(),
+            remediation=_remediation(findings),
             verification=_verification(),
             related_issues=[],
             presentation_suppressed_issue_codes=[],
@@ -477,31 +477,25 @@ def _impact() -> list[ImpactItem]:
     ]
 
 
-def _remediation() -> list[RemediationStep]:
+def _remediation(findings: Sequence[_ExactNameFinding]) -> list[RemediationStep]:
     """Read-only SAFE guidance (truth tables §19.15, R2 plan §28).
 
-    D004 cannot know which runtime-library source the user intends or
-    which entry is safe to change, so every step carries ``command=None``
-    and no path, version, entry text, or package-manager action is
+    Class-aware wording (maintainer R2 review): when every emitted
+    finding is Class A, both the earlier incompatible and the later
+    compatible same-name LD_LIBRARY_PATH providers were observed, so
+    precise same-name reorder guidance is valid. When any finding is
+    Class B, the only expected-family provider observed is the
+    package-local corroborator — content evidence, never cross-origin
+    loader precedence — so the guidance stays loader-neutral: remove or
+    isolate the override and observe, assuming nothing about which
+    alternative provider the loader would choose. In both variants D004
+    cannot know which runtime-library source the user intends or which
+    entry is safe to change, so every step carries ``command=None`` and
+    no path, version, entry text, or package-manager action is
     invented. Deleting or overwriting shared libraries is never
-    recommended; only the search configuration may be simplified. For a
-    Class B finding nothing asserts that the package-local copy would
-    win once the override is removed — that precedence is not modeled.
+    recommended; only the search configuration may be simplified.
     """
-    return [
-        RemediationStep(
-            action=(
-                "Temporarily remove or reorder the conflicting "
-                "LD_LIBRARY_PATH entry so the environment's expected "
-                "library family is preferred within the search order"
-            ),
-            why=(
-                "An earlier entry wins within the modeled search order; "
-                "moving or dropping the conflicting entry lets the "
-                "expected family resolve first without touching any files"
-            ),
-            safety=RemediationSafety.SAFE,
-        ),
+    follow_up = [
         RemediationStep(
             action=(
                 "Start from a clean shell (or one without the inherited "
@@ -522,6 +516,38 @@ def _remediation() -> list[RemediationStep]:
             ),
             safety=RemediationSafety.SAFE,
         ),
+    ]
+    if all(finding.conflict_class == "A" for finding in findings):
+        return [
+            RemediationStep(
+                action=(
+                    "Temporarily remove or reorder the conflicting "
+                    "LD_LIBRARY_PATH entry so the environment's expected "
+                    "library family is preferred within the search order"
+                ),
+                why=(
+                    "An earlier entry wins within the modeled search order; "
+                    "moving or dropping the conflicting entry lets the "
+                    "expected family resolve first without touching any files"
+                ),
+                safety=RemediationSafety.SAFE,
+            ),
+            *follow_up,
+        ]
+    return [
+        RemediationStep(
+            action=(
+                "Temporarily remove or isolate the conflicting "
+                "LD_LIBRARY_PATH override"
+            ),
+            why=(
+                "This tests whether the override contributes to the "
+                "observed alias mismatch without assuming which "
+                "alternative provider the loader would choose"
+            ),
+            safety=RemediationSafety.SAFE,
+        ),
+        *follow_up,
     ]
 
 

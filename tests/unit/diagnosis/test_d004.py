@@ -1154,20 +1154,29 @@ class TestClassBCorroboration:
         assert RULE.evaluate(facts, []) is None
 
     def test_class_b_never_claims_a_cross_origin_winner(self):
-        # Row F emits — but only as a conditional static risk; nothing in
-        # the environmental claims (summary, evidence, impact) says the
-        # package-local copy wins, loads, or is preferred across origins.
-        # The frozen §28 remediation prose ("an earlier entry wins within
-        # the modeled search order") is scoped guidance about the modeled
-        # ordering, not a cross-origin loader claim, so it is not scanned.
+        # Row F emits — but only as a conditional static risk. NOTHING in
+        # the output, remediation action/why text included, says the
+        # package-local copy wins or loads, that the expected family
+        # resolves first, or that any origin is preferred.
         candidate = RULE.evaluate(class_b_facts(), [])
         assert candidate is not None
         claimed = " ".join(
             [candidate.diagnosis.summary]
             + [item.value for item in candidate.diagnosis.evidence]
             + [f"{item.scope} {item.status}" for item in candidate.diagnosis.impact]
+            + [f"{step.action} {step.why}" for step in candidate.diagnosis.remediation]
         )
-        for forbidden in ("wins", "winner", "will load", "is loaded", "definitely loads"):
+        for forbidden in (
+            "wins",
+            "winner",
+            "will load",
+            "is loaded",
+            "definitely loads",
+            "resolves first",
+            "is preferred",
+            "preferred by",
+            "would load",
+        ):
             assert forbidden not in claimed, forbidden
         assert "independently observed current-Python" in candidate.diagnosis.summary
 
@@ -1908,7 +1917,8 @@ class TestRpathNonInference:
         # Row J: deciding which origin the loader would prefer needs
         # RPATH/RUNPATH knowledge. Revision 3 still permits the frozen
         # Class-B conditional static risk for this shape — the assertion
-        # is that the output never upgrades it into a winner claim.
+        # is that the output, remediation included, never upgrades it
+        # into a winner or preference claim.
         candidate = RULE.evaluate(
             facts_with(
                 runtime_facts(
@@ -1927,10 +1937,21 @@ class TestRpathNonInference:
             [candidate.diagnosis.summary]
             + [item.value for item in candidate.diagnosis.evidence]
             + [f"{item.scope} {item.status}" for item in candidate.diagnosis.impact]
+            + [f"{step.action} {step.why}" for step in candidate.diagnosis.remediation]
         )
-        # The frozen §28 remediation prose describes the modeled ordering
-        # only; the environmental claims are what must stay conditional.
-        for forbidden in ("wins", "winner", "will load", "definitely loads", "RPATH", "RUNPATH"):
+        for forbidden in (
+            "wins",
+            "winner",
+            "will load",
+            "is loaded",
+            "definitely loads",
+            "resolves first",
+            "is preferred",
+            "preferred by",
+            "would load",
+            "RPATH",
+            "RUNPATH",
+        ):
             assert forbidden not in claimed, forbidden
 
     @pytest.mark.parametrize("module", [rules_base, d004_module], ids=["base", "d004"])
@@ -2205,9 +2226,11 @@ class TestCandidateOutputContent:
         ]
 
     def test_remediation_safe_guidance_without_commands(self):
-        # §19.15 (frozen; amendment OQ-3 — remediation untouched by R2):
-        # remove/reorder the conflicting entry, start a clean shell,
-        # re-run cuda-doctor — all SAFE, nothing executed.
+        # §19.15 (frozen shape; the maintainer R2 review made the wording
+        # class-aware): adjust LD_LIBRARY_PATH, start a clean shell,
+        # re-run cuda-doctor — all SAFE, nothing executed. The Class-A
+        # variant keeps the same-name reorder guidance; any Class-B
+        # variant stays loader-neutral (both pinned by the tests below).
         steps = conflict_diagnosis().remediation
         assert 2 <= len(steps) <= 5
         for step in steps:
@@ -2239,6 +2262,111 @@ class TestCandidateOutputContent:
             "cuda-12",
         ):
             assert forbidden not in rendered, forbidden
+
+    def test_class_a_remediation_retains_same_name_reorder_guidance(self):
+        # Maintainer R2 review fix: a Class-A-only diagnosis observed both
+        # the earlier incompatible and the later compatible same-name
+        # providers, so the stronger intra-LD_LIBRARY_PATH reorder
+        # guidance stays valid — and the summary around it is exactly the
+        # frozen Revision-3 output.
+        diagnosis = conflict_diagnosis()
+        assert diagnosis.summary == (
+            "Runtime-library alias resolution conflict within the modeled "
+            "LD_LIBRARY_PATH ordering: for libcudart, within the modeled "
+            "LD_LIBRARY_PATH lookup for the observed versioned name "
+            "libcudart.so.12 (claims family 12), the incompatible target "
+            "family 11 at entry 0 precedes a compatible same-name target. "
+            "The static inventory indicates a conditional resolution risk; "
+            "the actual loaded object is not observed by this analysis."
+        )
+        rendered = " ".join(f"{s.action} {s.why}" for s in diagnosis.remediation)
+        assert "reorder" in rendered
+        assert "resolve first" in rendered
+        assert "expected library family is preferred" in rendered
+        for step in diagnosis.remediation:
+            assert step.safety is RemediationSafety.SAFE
+            assert step.command is None
+
+    def test_class_b_remediation_is_loader_neutral(self):
+        # Maintainer R2 review fix: the Class-B package-local corroborator
+        # is content evidence, never cross-origin loader precedence — the
+        # guidance must not claim or imply any winner, any expected-family
+        # resolution order, or any preferred origin.
+        steps = RULE.evaluate(class_b_facts(), []).diagnosis.remediation
+        assert len(steps) == 3
+        rendered = " ".join(f"{step.action} {step.why}" for step in steps)
+        for forbidden in (
+            "wins",
+            "winner",
+            "resolves first",
+            "preferred",
+            "will load",
+            "would load",
+            "package-local provider will",
+        ):
+            assert forbidden not in rendered, forbidden
+        assert "remove or isolate" in rendered
+        assert "without assuming which alternative provider" in rendered
+        assert "LD_LIBRARY_PATH" in rendered
+        for step in steps:
+            assert step.safety is RemediationSafety.SAFE
+            assert step.command is None
+
+    def test_any_class_b_finding_makes_the_whole_diagnosis_loader_neutral(self):
+        # One Class-B finding anywhere suffices: the whole remediation
+        # switches to the loader-neutral variant (never partially, never
+        # per-family), since no package-local corroborator establishes
+        # cross-origin precedence for any family in the output.
+        facts = facts_with(
+            runtime_facts(
+                candidates=(
+                    lib("libcudart", "12", order=0, target="11"),
+                    lib("libcudart", "12", order=1, target="12"),
+                    lib("libcudnn", "9", order=0, target="8"),
+                    lib("libcudnn", "9", origin=ORIGIN_PYTHON_PACKAGE, target="9"),
+                ),
+                cudnn_family="9",
+            )
+        )
+        diagnosis = RULE.evaluate(facts, []).diagnosis
+        rendered = " ".join(f"{s.action} {s.why}" for s in diagnosis.remediation)
+        assert "reorder" not in rendered
+        assert "resolve first" not in rendered
+        assert "wins" not in rendered
+        assert "without assuming which alternative provider" in rendered
+
+    def test_class_b_decision_evidence_summary_unchanged_by_the_fix(self):
+        # The fix is output-scoped to remediation: the Class-B decision
+        # (emit, MEDIUM/WARNING, risk_only), the frozen evidence list, the
+        # frozen summary, and the shared impact/verification constants are
+        # exactly the pre-fix Revision-3 values.
+        candidate = RULE.evaluate(class_b_facts(), [])
+        assert candidate is not None
+        diagnosis = candidate.diagnosis
+        assert diagnosis.confidence is Confidence.MEDIUM
+        assert diagnosis.severity is Severity.WARNING
+        assert candidate.risk_only is True
+        assert diagnosis.summary == (
+            "Runtime-library alias resolution conflict within the modeled "
+            "LD_LIBRARY_PATH ordering: for libcudart, an LD_LIBRARY_PATH "
+            "provider for the observed versioned alias libcudart.so.12 "
+            "(claims family 12) resolves to family 11, a different target "
+            "family than an independently observed current-Python "
+            "compatible provider of the same alias. The static inventory "
+            "indicates a conditional resolution risk; the actual loaded "
+            "object is not observed by this analysis."
+        )
+        assert [(item.key, item.source) for item in diagnosis.evidence] == [
+            ("libcudart_conflicting", "runtime_libraries"),
+            ("libcudart_expected", "torch"),
+            ("static_relation", "compatibility"),
+        ]
+        assert diagnosis.evidence[1].value == (
+            "family 12 package-local provider of libcudart.so.12"
+        )
+        reference = conflict_diagnosis()
+        assert diagnosis.impact == reference.impact
+        assert diagnosis.verification == reference.verification
 
     def test_frozen_verification_commands(self):
         # §19.16 minimum (plan §29), display-only; Linux-only rule so no

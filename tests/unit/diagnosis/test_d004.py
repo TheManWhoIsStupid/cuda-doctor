@@ -77,11 +77,23 @@ def lib(
     order: int | None = None,
     reliability: IdentityReliability = IdentityReliability.DIRECT,
     active: Trinary = Trinary.UNKNOWN,
+    target: str | None = None,
 ) -> RuntimeLibraryCandidateFact:
-    """Synthetic normalized candidate; only the D004 surface is populated."""
+    """Synthetic normalized candidate; only the D004 surface is populated.
+
+    R1 shape migration: the old synthetic ``version`` concept is now the
+    split identity the transitional rule reads — a versioned exact load
+    name claiming that family (``load_name_family_version``), optionally
+    with a canonical-target family (``target``). ``version=None`` means
+    no name-derived identity at all: bare name, ``load_name_family_version``
+    ``None``.
+    """
+    load_name = f"{family}.so.{version}" if version is not None else f"{family}.so"
     return RuntimeLibraryCandidateFact(
         family=family,
-        family_version=version,
+        load_name=load_name,
+        load_name_family_version=version,
+        target_family_version=target,
         reliability=reliability,
         origin=origin,
         active_toolkit=active,
@@ -191,12 +203,21 @@ def raw(
     origin: str,
     order: int | None = None,
     path: str | None = None,
+    canonical_path: str | None = None,
     version_source: str | None = VERSION_SOURCE_FILENAME,
 ) -> RuntimeLibraryCandidate:
-    """A raw Phase-3 inventory candidate for builder-based tests."""
+    """A raw Phase-3 inventory candidate for builder-based tests.
+
+    R1: ``canonical_path`` lets a synthetic candidate simulate what the
+    strict collector records for a resolvable symlink target (synthetic
+    fixtures never touch the real filesystem); a bare name is expressed
+    with ``version=None`` and an explicit bare ``path``.
+    """
+    suffix = f".so.{version}" if version is not None else ".so"
     return RuntimeLibraryCandidate(
         family=family,
-        path=path or f"/opt/inventory/{family}.so.{version}",
+        path=path or f"/opt/inventory/{family}{suffix}",
+        canonical_path=canonical_path,
         version=version,
         version_source=version_source,
         origin=origin,
@@ -1497,12 +1518,19 @@ class TestBuilderEndToEnd:
         assert candidate.diagnosis.confidence is Confidence.MEDIUM
 
     def test_symlink_derived_identity_is_still_reliable(self):
+        # R1 shape migration: a bare observed name carries no family claim
+        # (``load_name_family_version`` None); the identity comes from the
+        # reliably resolved canonical target (DERIVED_STRONG), which the
+        # transitional rule still consumes through its filename-first /
+        # target-second compatibility mapping.
         snapshot = snapshot_with_inventory(
             raw(
                 "libcudart",
                 "11",
                 origin=ORIGIN_LD_LIBRARY_PATH,
                 order=0,
+                path="/opt/inventory/libcudart.so",
+                canonical_path="/opt/inventory/libcudart.so.11.8",
                 version_source=VERSION_SOURCE_SYMLINK_TARGET,
             ),
             raw(
@@ -1514,6 +1542,9 @@ class TestBuilderEndToEnd:
         )
         facts = built_facts(snapshot)
         preferred = facts.runtime_libraries.candidates[0]
+        assert preferred.load_name == "libcudart.so"
+        assert preferred.load_name_family_version is None
+        assert preferred.target_family_version == "11"
         assert preferred.reliability is IdentityReliability.DERIVED_STRONG
         assert RULE.evaluate(facts, []) is not None
 

@@ -374,6 +374,32 @@ def _family_for_filename(name: str) -> str | None:
     return match.group(1) if match else None
 
 
+def family_for_filename(name: str) -> str | None:
+    """Family-grammar check over an already-observed exact name (public).
+
+    R1 split-identity support for the pure Phase-5 fact builder: the same
+    frozen grammar collection uses, exposed so the builder can classify a
+    captured basename without re-implementing (or importing ``os`` for)
+    the grammar. Recognition only — no name is ever generated here.
+    """
+    return _family_for_filename(name)
+
+
+def family_version_from_name(name: str) -> str | None:
+    """The FIRST numeric component of a versioned family name's tail.
+
+    R1 split-identity support (plan §6): ``libcudart.so.11.0`` -> "11",
+    ``libcudart.so.12.4.127`` -> "12", ``libcudnn.so.9`` -> "9". Bare
+    (``libcudart.so``) and malformed/unsupported names yield ``None`` —
+    never a guessed family. The exact observed name itself is never
+    rewritten or reduced by this parse.
+    """
+    match = _LIBRARY_FILE_RE.match(name)
+    if match and match.group(2):
+        return match.group(2).split(".")[0]
+    return None
+
+
 def _version_from_filename(path: str | None) -> str | None:
     """The dotted-digits version tail of a family filename, else ``None``.
 
@@ -387,8 +413,16 @@ def _version_from_filename(path: str | None) -> str | None:
 
 
 def _canonicalize(path: str) -> str | None:
-    """Symlink-resolved absolute form; ``None`` when resolution fails."""
+    """Strictly resolvable canonical target; ``None`` when resolution fails.
+
+    Strengthened R1 invariant (frozen post-freeze correction, architecture
+    §10.3/§12.9): a non-null ``canonical_path`` means canonical-target
+    resolution *successfully completed* against the real filesystem —
+    ``Path.resolve(strict=True)``. Dangling or otherwise unresolvable
+    targets yield ``None`` so the pure fact builder can never normalize a
+    lexical (never-verified) target into a family identity.
+    """
     try:
-        return str(Path(path).resolve(strict=False))
+        return str(Path(path).resolve(strict=True))
     except (OSError, ValueError, RuntimeError):
         return None

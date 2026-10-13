@@ -1524,22 +1524,32 @@ class TestRuntimeLibraryFacts:
         }
         # Family/version identities survive per origin — nothing is
         # reduced to counts: package-local, toolkit, conda, and ldconfig
-        # versions are all preserved.
-        assert by_origin[ORIGIN_LD_LIBRARY_PATH].family_version == "11"
-        assert by_origin[ORIGIN_PYTHON_PACKAGE].family_version == "12"
-        assert by_origin[ORIGIN_TOOLKIT].family_version == "12"
-        assert by_origin[ORIGIN_CONDA_PREFIX].family_version == "12"
-        assert by_origin[ORIGIN_LDCONFIG].family_version == "9"
+        # versions are all preserved. R1: the identity is the split
+        # load-name family plus the exact observed name.
+        assert by_origin[ORIGIN_LD_LIBRARY_PATH].load_name_family_version == "11"
+        assert by_origin[ORIGIN_LD_LIBRARY_PATH].load_name == "libcudart.so.11"
+        assert by_origin[ORIGIN_PYTHON_PACKAGE].load_name_family_version == "12"
+        assert by_origin[ORIGIN_TOOLKIT].load_name_family_version == "12"
+        assert by_origin[ORIGIN_CONDA_PREFIX].load_name_family_version == "12"
+        assert by_origin[ORIGIN_LDCONFIG].load_name_family_version == "9"
         assert by_origin[ORIGIN_LDCONFIG].family == "libcudnn"
 
     def test_candidate_field_set_exactly_the_minimal_shape(self):
+        # R1 final contract (plan §13 K): the split identity fields replace
+        # the old conflated ``family_version`` — whose absence this exact
+        # set equality pins.
         assert {field.name for field in fields(RuntimeLibraryCandidateFact)} == {
             "family",
-            "family_version",
+            "load_name",
+            "load_name_family_version",
+            "target_family_version",
             "reliability",
             "origin",
             "active_toolkit",
             "modeled_search_order",
+        }
+        assert "family_version" not in {
+            field.name for field in fields(RuntimeLibraryCandidateFact)
         }
 
     def test_only_ldp_carries_modeled_order(self):
@@ -1605,16 +1615,45 @@ class TestRuntimeLibraryFacts:
         assert runtime.candidates[0].modeled_search_order is None  # ...order not claimed
 
     def test_candidate_reliability_mapping(self):
-        runtime = build_facts(
-            self.snapshot_with_inventory(self.ldp_inventory())
-        ).runtime_libraries
+        # R1 (amendment §8): reliability qualifies the observed family
+        # identity only — DIRECT when the observed name claims the family,
+        # DERIVED_STRONG when a bare name's reliably derived canonical
+        # target does, UNKNOWN when neither.
+        inv = inventory(
+            library(
+                "libcudart",
+                "/opt/first/lib/libcudart.so.11",
+                version="11",
+                source=VERSION_SOURCE_FILENAME,
+                origin=ORIGIN_LD_LIBRARY_PATH,
+                search_order=0,
+            ),
+            library(
+                "libcudnn",
+                "/opt/first/lib/libcudnn.so",
+                version="9",
+                source=VERSION_SOURCE_SYMLINK_TARGET,
+                origin=ORIGIN_LD_LIBRARY_PATH,
+                search_order=0,
+                canonical_path="/opt/first/lib/libcudnn.so.9.1",
+            ),
+            library(
+                "libcublas",
+                "/opt/first/lib/libcublas.so",
+                version=None,
+                source=None,
+                origin=ORIGIN_LD_LIBRARY_PATH,
+                search_order=0,
+            ),
+        )
+        runtime = build_facts(self.snapshot_with_inventory(inv)).runtime_libraries
         by_signature = {
-            (candidate.family, candidate.family_version): candidate.reliability
+            (candidate.family, candidate.load_name): candidate.reliability
             for candidate in runtime.candidates
         }
-        assert by_signature[("libcudart", "11")] is IdentityReliability.DIRECT
-        assert by_signature[("libcublas", "12")] is IdentityReliability.DERIVED_STRONG
-        assert by_signature[("libcudnn", None)] is IdentityReliability.UNKNOWN
+        assert by_signature[("libcudart", "libcudart.so.11")] is IdentityReliability.DIRECT
+        assert by_signature[("libcudnn", "libcudnn.so")] is IdentityReliability.DERIVED_STRONG
+        assert by_signature[("libcublas", "libcublas.so")] is IdentityReliability.UNKNOWN
 
     def test_candidate_ordering_deterministic(self):
         first = build_facts(
@@ -1760,7 +1799,9 @@ class TestRuntimeLibraryFacts:
 
     def test_no_paths_or_scan_errors_carried(self):
         # Privacy (§28): facts carry normalized identities only — no
-        # library paths, no raw scan-error text.
+        # library paths, no raw scan-error text. R1: the bounded exact
+        # load NAME is part of the frozen contract, but no directory
+        # path, username, or error text may appear anywhere.
         inv = RuntimeLibraryInventory(
             candidates=[
                 library(
@@ -1775,10 +1816,15 @@ class TestRuntimeLibraryFacts:
             scan_errors={"ldconfig": "PermissionError: /home/secretuser denied"},
         )
         snapshot = self.snapshot_with_inventory(inv)
-        rendered = str(asdict(build_facts(snapshot).runtime_libraries))
+        runtime = build_facts(snapshot).runtime_libraries
+        rendered = str(asdict(runtime))
         assert "secretuser" not in rendered
         assert "PermissionError" not in rendered
-        assert "libcudart.so" not in rendered
+        assert "/home/" not in rendered
+        assert "/lib/" not in rendered
+        # The bounded exact name is the only filename content carried.
+        assert runtime.candidates[0].load_name == "libcudart.so.12"
+        assert "/" not in runtime.candidates[0].load_name
 
     def test_malformed_normalization_fallback_claims_incompleteness(self):
         # Maintainer review Fix 3: a runtime-library normalization failure
@@ -1794,6 +1840,173 @@ class TestRuntimeLibraryFacts:
         rendered = str(asdict(runtime))
         assert "Error" not in rendered
         assert "None" in rendered  # unknown-shaped, not fabricated content
+
+
+class TestRuntimeIdentitySplit:
+    """R1 regressions (plan §13 A-K): the split identity over captured
+    observations — exact ``load_name``, parsed load-name family, and a
+    target family gated by the strict-resolvability invariant. Synthetic
+    raw candidates carry the ``canonical_path`` the strict collector
+    records (None for dangling/unresolvable targets)."""
+
+    def _runtime(self, *candidates: RuntimeLibraryCandidate) -> RuntimeLibraryFacts:
+        snapshot = base_snapshot()
+        snapshot.runtime_libraries = inventory(*candidates)
+        return build_facts(snapshot).runtime_libraries
+
+    def _single(self, candidate: RuntimeLibraryCandidate) -> RuntimeLibraryCandidateFact:
+        runtime = self._runtime(candidate)
+        assert len(runtime.candidates) == 1
+        return runtime.candidates[0]
+
+    def _symlink(
+        self, *, name: str, canonical: str | None
+    ) -> RuntimeLibraryCandidate:
+        version = name.rsplit(".so.", 1)[1] if ".so." in name else None
+        return library(
+            "libcudart",
+            f"/ldp/{name}",
+            version=version,
+            source=VERSION_SOURCE_FILENAME,
+            origin=ORIGIN_LD_LIBRARY_PATH,
+            search_order=0,
+            canonical_path=canonical,
+        )
+
+    def test_a_valid_misleading_symlink_keeps_both_identities(self):
+        # libcudart.so.12 -> existing libcudart.so.11.8.89.
+        fact = self._single(
+            self._symlink(name="libcudart.so.12", canonical="/ldp/libcudart.so.11.8.89")
+        )
+        assert fact.load_name == "libcudart.so.12"
+        assert fact.load_name_family_version == "12"
+        assert fact.target_family_version == "11"
+
+    def test_b_valid_compatible_symlink_target_matches(self):
+        # libcudart.so.12 -> existing libcudart.so.12.4.127.
+        fact = self._single(
+            self._symlink(name="libcudart.so.12", canonical="/ldp/libcudart.so.12.4.127")
+        )
+        assert fact.load_name_family_version == "12"
+        assert fact.target_family_version == "12"
+
+    def test_c_dangling_misleading_symlink_target_is_none(self):
+        # libcudart.so.12 -> missing libcudart.so.11.x: strict resolution
+        # failed, canonical_path is None, and the observed load-name
+        # identity survives untouched.
+        fact = self._single(self._symlink(name="libcudart.so.12", canonical=None))
+        assert fact.load_name == "libcudart.so.12"
+        assert fact.load_name_family_version == "12"
+        assert fact.target_family_version is None
+
+    def test_d_dangling_compatible_looking_symlink_target_is_none(self):
+        # libcudart.so.12 -> missing libcudart.so.12.x.
+        fact = self._single(self._symlink(name="libcudart.so.12", canonical=None))
+        assert fact.target_family_version is None
+
+    def test_e_regular_existing_versioned_file_target_equals_name_family(self):
+        # A regular file resolves to itself: canonical basename ==
+        # observed name, so the target family equals the name family by
+        # construction (amendment §6).
+        fact = self._single(
+            self._symlink(name="libcudart.so.12", canonical="/ldp/libcudart.so.12")
+        )
+        assert fact.load_name_family_version == "12"
+        assert fact.target_family_version == "12"
+        assert fact.reliability is IdentityReliability.DIRECT
+
+    def test_f_bare_alias_target_establishes_baseline_family(self):
+        # libcudnn.so -> existing libcudnn.so.9.x: the bare name claims
+        # nothing, but the reliable target identity still feeds the
+        # package-local family baseline (plan §10).
+        runtime = self._runtime(
+            library(
+                "libcudnn",
+                "/site/nvidia/cudnn/lib/libcudnn.so",
+                version="9.1",
+                source=VERSION_SOURCE_SYMLINK_TARGET,
+                origin=ORIGIN_PYTHON_PACKAGE,
+                canonical_path="/site/nvidia/cudnn/lib/libcudnn.so.9.1",
+            )
+        )
+        fact = runtime.candidates[0]
+        assert fact.load_name == "libcudnn.so"
+        assert fact.load_name_family_version is None
+        assert fact.target_family_version == "9"
+        assert fact.reliability is IdentityReliability.DERIVED_STRONG
+        assert runtime.package_local_cudnn_family == "9"
+
+    def test_g_exact_name_never_normalized(self):
+        # libcudart.so.11.0 stays exact; only the parsed family ("11")
+        # is compared against baselines — never a rewrite of the name.
+        fact = self._single(
+            self._symlink(name="libcudart.so.11.0", canonical="/ldp/libcudart.so.11.0")
+        )
+        assert fact.load_name == "libcudart.so.11.0"
+        assert fact.load_name_family_version == "11"
+
+    def test_h_malformed_canonical_target_is_none(self):
+        fact = self._single(
+            self._symlink(name="libcudart.so.12", canonical="/ldp/libcudart.so.12.bak")
+        )
+        assert fact.target_family_version is None
+        assert fact.load_name_family_version == "12"
+
+    def test_i_cross_family_canonical_target_is_none(self):
+        fact = self._single(
+            self._symlink(name="libcudart.so.12", canonical="/ldp/libcublas.so.12")
+        )
+        assert fact.target_family_version is None
+
+    def test_j_no_directory_path_in_the_fact(self):
+        fact = self._single(
+            self._symlink(
+                name="libcudart.so.12",
+                canonical="/home/secretuser/ldp/libcudart.so.12.4",
+            )
+        )
+        rendered = str(asdict(fact))
+        assert "secretuser" not in rendered
+        assert "/" not in rendered
+
+    def test_target_family_is_never_a_load_name_fallback(self):
+        # Structural anti-pattern pin (plan §25): an unresolvable target
+        # stays None — the load-name family is never smuggled in as
+        # target identity.
+        fact = self._single(
+            library(
+                "libcudart",
+                "/ldp/libcudart.so",
+                version=None,
+                source=None,
+                origin=ORIGIN_LD_LIBRARY_PATH,
+                search_order=0,
+                canonical_path=None,
+            )
+        )
+        assert fact.load_name_family_version is None
+        assert fact.target_family_version is None
+        assert fact.reliability is IdentityReliability.UNKNOWN
+
+    def test_ldconfig_cache_advertised_name_is_the_load_name(self):
+        # ldconfig rows (plan §11): the cache-advertised name populates
+        # load_name; a non-resolvable referenced path yields no target
+        # family and never a modeled order.
+        fact = self._single(
+            library(
+                "libcudnn",
+                "/usr/lib/x86_64-linux-gnu/libcudnn.so.9",
+                version="9",
+                source=VERSION_SOURCE_FILENAME,
+                origin=ORIGIN_LDCONFIG,
+                soname="libcudnn.so.9",
+                canonical_path=None,
+            )
+        )
+        assert fact.load_name == "libcudnn.so.9"
+        assert fact.load_name_family_version == "9"
+        assert fact.target_family_version is None
+        assert fact.modeled_search_order is None
 
 
 class TestToolkitCandidateAssociation:
@@ -1876,7 +2089,7 @@ class TestToolkitCandidateAssociation:
             ),
         )
         by_version = {
-            c.family_version: c.active_toolkit
+            c.load_name_family_version: c.active_toolkit
             for c in build_facts(snapshot).runtime_libraries.candidates
         }
         assert by_version == {"12": Trinary.TRUE, "11": Trinary.FALSE}
@@ -1999,7 +2212,7 @@ class TestToolkitCandidateAssociation:
             ),
         )
         by_path_version = {
-            (c.family_version, c.active_toolkit)
+            (c.load_name_family_version, c.active_toolkit)
             for c in build_facts(snapshot).runtime_libraries.candidates
         }
         assert by_path_version == {("12", Trinary.TRUE), ("12", Trinary.UNKNOWN)}
@@ -2218,6 +2431,21 @@ class TestPurityAndDeterminism:
             {"os", "subprocess", "shutil", "site", "time", "random", "torch"}
         )
 
+    def test_fact_builder_source_never_touches_the_filesystem(self):
+        # R1 (plan §18): all target-resolvability work happens during
+        # collection; the builder consumes captured observations only.
+        # Filesystem access without an import is still detectable as the
+        # canonical call shapes (module imports are pinned separately).
+        source = Path(facts_module.__file__).read_text()
+        for forbidden in (
+            ".resolve(",
+            "os.path.exists",
+            "os.listdir",
+            "iterdir(",
+            "readlink(",
+        ):
+            assert forbidden not in source, forbidden
+
     def test_all_fact_models_frozen(self):
         facts = build_facts(base_snapshot())
         selector = ToolkitSelectorFact(
@@ -2238,7 +2466,9 @@ class TestPurityAndDeterminism:
         )
         modeled = RuntimeLibraryCandidateFact(
             family="libcudart",
-            family_version=None,
+            load_name="libcudart.so",
+            load_name_family_version=None,
+            target_family_version=None,
             reliability=IdentityReliability.UNKNOWN,
             origin=ORIGIN_LD_LIBRARY_PATH,
             active_toolkit=Trinary.UNKNOWN,

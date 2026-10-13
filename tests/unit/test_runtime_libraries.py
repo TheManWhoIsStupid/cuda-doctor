@@ -30,6 +30,8 @@ from cuda_doctor.collectors.runtime_libraries import (
     VERSION_SOURCE_UNKNOWN,
     RuntimeLibraryCollector,
     _default_site_packages,
+    family_for_filename,
+    family_version_from_name,
     toolkit_library_roots,
 )
 from cuda_doctor.core.enums import Platform
@@ -536,6 +538,102 @@ class TestVersionSemantics:
         assert candidate.path == str(lib_dir / "libcudart.so.12")
         assert candidate.version == "12"  # from the observed filename
         assert candidate.version_source == VERSION_SOURCE_FILENAME
+
+
+class TestStrictCanonicalization:
+    """R1 strengthened invariant (plan §4): a non-null ``canonical_path``
+    means canonical-target resolution successfully completed — strict
+    resolution. Dangling or unresolvable targets collapse to ``None`` so
+    the pure Phase-5 fact builder can never normalize a lexical
+    (never-verified) target into a family identity."""
+
+    @requires_symlinks
+    def test_valid_misleading_symlink_canonical_is_the_resolved_target(self, tmp_path):
+        # libcudart.so.12 -> existing libcudart.so.11.8.89 (regression A).
+        lib_dir = tmp_path / "libs"
+        _lib(lib_dir, "libcudart.so.11.8.89")
+        os.symlink(lib_dir / "libcudart.so.11.8.89", lib_dir / "libcudart.so.12")
+        candidate = _collect(
+            environment=_env_info(ld_library_path=str(lib_dir))
+        ).candidates[0]
+        assert candidate.canonical_path == str(lib_dir / "libcudart.so.11.8.89")
+
+    @requires_symlinks
+    def test_dangling_symlink_canonical_is_none(self, tmp_path):
+        # libcudart.so.12 -> missing libcudart.so.11.x (regression C/D):
+        # the observed filename identity survives; the target does not.
+        lib_dir = tmp_path / "libs"
+        lib_dir.mkdir()
+        os.symlink(lib_dir / "libcudart.so.11.8.89", lib_dir / "libcudart.so.12")
+        candidate = _collect(
+            environment=_env_info(ld_library_path=str(lib_dir))
+        ).candidates[0]
+        assert candidate.canonical_path is None
+        assert candidate.version == "12"
+        assert candidate.version_source == VERSION_SOURCE_FILENAME
+
+    @requires_symlinks
+    def test_dangling_bare_symlink_yields_no_target_identity(self, tmp_path):
+        # A bare dangling alias must not contribute any identity: before
+        # the strict invariant it lexically "resolved" to its missing
+        # target's filename and claimed that version.
+        lib_dir = tmp_path / "libs"
+        lib_dir.mkdir()
+        os.symlink(lib_dir / "libcudart.so.12.9.0", lib_dir / "libcudart.so")
+        candidate = _collect(
+            environment=_env_info(ld_library_path=str(lib_dir))
+        ).candidates[0]
+        assert candidate.canonical_path is None
+        assert candidate.version is None
+        assert candidate.version_source == VERSION_SOURCE_UNKNOWN
+
+    def test_regular_existing_file_canonical_is_itself(self, tmp_path):
+        # A regular versioned file resolves to itself (regression E):
+        # canonical basename == observed name by construction.
+        lib_dir = tmp_path / "libs"
+        _lib(lib_dir, "libcudart.so.12")
+        candidate = _collect(
+            environment=_env_info(ld_library_path=str(lib_dir))
+        ).candidates[0]
+        assert candidate.canonical_path == str(lib_dir / "libcudart.so.12")
+
+    @requires_symlinks
+    def test_bare_valid_symlink_canonical_is_the_versioned_target(self, tmp_path):
+        # libcudnn.so -> existing libcudnn.so.9.1 (regression F shape).
+        lib_dir = tmp_path / "libs"
+        _lib(lib_dir, "libcudnn.so.9.1")
+        os.symlink(lib_dir / "libcudnn.so.9.1", lib_dir / "libcudnn.so")
+        candidate = _collect(
+            environment=_env_info(ld_library_path=str(lib_dir))
+        ).candidates[0]
+        assert candidate.canonical_path == str(lib_dir / "libcudnn.so.9.1")
+
+
+class TestFamilyGrammarHelpers:
+    """R1 exported grammar helpers (plan §6): recognition only — the
+    exact observed name is never rewritten, and no name is generated."""
+
+    def test_family_version_from_name_first_numeric_component(self):
+        assert family_version_from_name("libcudart.so.11.0") == "11"
+        assert family_version_from_name("libcudart.so.12") == "12"
+        assert family_version_from_name("libcudart.so.12.4.127") == "12"
+        assert family_version_from_name("libcublas.so.11") == "11"
+        assert family_version_from_name("libcudnn.so.9") == "9"
+
+    def test_family_version_from_name_bare_or_malformed_is_none(self):
+        assert family_version_from_name("libcudart.so") is None
+        assert family_version_from_name("libcudart.so.bak") is None
+        assert family_version_from_name("libcudart.so.12.debug") is None
+        assert family_version_from_name("libcublasLt.so.12") is None
+        assert family_version_from_name("libfoo.so.1") is None
+        assert family_version_from_name("readme.txt") is None
+
+    def test_family_for_filename_public_matches_collection_scope(self):
+        assert family_for_filename("libcublas.so.12") == "libcublas"
+        assert family_for_filename("libcudnn.so.9.1") == "libcudnn"
+        assert family_for_filename("libcudart.so") == "libcudart"
+        assert family_for_filename("libcublasLt.so.12") is None
+        assert family_for_filename("libcudart_static.a") is None
 
 
 class TestCandidateModelSemantics:

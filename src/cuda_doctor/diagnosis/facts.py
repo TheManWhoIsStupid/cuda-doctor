@@ -46,8 +46,8 @@ from cuda_doctor.collectors.runtime_libraries import (
     ORIGIN_LD_LIBRARY_PATH,
     ORIGIN_PYTHON_PACKAGE,
     ORIGIN_TOOLKIT,
-    VERSION_SOURCE_FILENAME,
-    VERSION_SOURCE_SYMLINK_TARGET,
+    family_for_filename,
+    family_version_from_name,
 )
 from cuda_doctor.compatibility import CompatibilityData, interpret_torch_cuda
 from cuda_doctor.core.enums import Platform
@@ -269,6 +269,39 @@ class VisibilityFacts:
 class RuntimeLibraryCandidateFact:
     """One normalized runtime-library candidate across the bounded origins.
 
+    R1 split identity (frozen architecture §12.9; the old conflated
+    ``family_version`` field is removed completely):
+
+    - ``load_name`` — the EXACT observed lookup-name identity: the
+      directory-entry basename for filesystem origins, or the
+      cache-advertised name for ldconfig rows. Preserved verbatim — a
+      tail of ``11.0`` is never reduced to ``11``, and the name is never
+      normalized, synthesized, or treated as a SONAME (no ELF metadata
+      is ever inspected).
+    - ``load_name_family_version`` — the family CLAIMED by the observed
+      name: the first numeric component of its tail
+      (``libcudart.so.11.0`` -> ``"11"``); ``None`` for bare
+      (``libcudart.so``) and malformed/unsupported names — never a
+      guess.
+    - ``target_family_version`` — the family of the canonical
+      (symlink-resolved) target's basename, populated ONLY when the
+      canonical path is non-null under the collector's strengthened
+      strict-resolvability invariant AND the target basename belongs to
+      the SAME supported family AND its numeric component is
+      unambiguous. Dangling / unresolvable / malformed / unsupported /
+      cross-family / ambiguous targets yield ``None`` — the load-name
+      family is NEVER substituted for an unknown target. For a
+      non-symlink, canonical basename == observed name, so it equals the
+      name family by construction.
+    - ``reliability`` — exactly ONE purpose (amendment §8): it qualifies
+      the candidate's OBSERVED FAMILY IDENTITY as used by package-local
+      family-baseline derivation — DIRECT (identity from the observed
+      versioned name), DERIVED_STRONG (bare name, identity from the
+      reliably derived canonical target), UNKNOWN (contributes to no
+      baseline). It never qualifies the ``load_name`` string, never
+      qualifies ``target_family_version`` (governed by the target
+      invariant above), and never enters a conflict predicate.
+
     Every Phase-3 bounded origin (ld_library_path, toolkit,
     python_package, conda_prefix, ldconfig) preserves candidate-level
     identity here so the D004 rule consumes facts, never the raw
@@ -276,10 +309,7 @@ class RuntimeLibraryCandidateFact:
     ld_library_path candidates whose entry order the collector actually
     established; every other origin keeps ``None`` — a candidate's
     existence is never dressed up as loader precedence, and no global
-    cross-origin order is invented. ``family_version`` is the normalized
-    comparable component (the leading dotted component of the
-    filename-derived version, e.g. ``12`` from ``libcudart.so.12``);
-    ``None`` means the family is UNKNOWN. No raw library path is carried.
+    cross-origin order is invented. No raw library path is carried.
 
     ``active_toolkit`` is the bounded association fact for D004's
     active-toolkit reasoning: whether a ``toolkit``-origin candidate
@@ -296,7 +326,9 @@ class RuntimeLibraryCandidateFact:
     """
 
     family: str
-    family_version: str | None
+    load_name: str
+    load_name_family_version: str | None
+    target_family_version: str | None
     reliability: IdentityReliability
     origin: str
     active_toolkit: Trinary
@@ -622,19 +654,87 @@ def _visibility_facts(snapshot: EnvironmentSnapshot) -> VisibilityFacts:
     return VisibilityFacts(cuda_visible_devices=state, explicit_all_gpu_mask=explicit_mask)
 
 
-def _library_reliability(version_source: str | None) -> IdentityReliability:
-    """Filename observation is direct; a symlink target's filename is one
-    derivation step; anything else is UNKNOWN."""
-    return {
-        VERSION_SOURCE_FILENAME: IdentityReliability.DIRECT,
-        VERSION_SOURCE_SYMLINK_TARGET: IdentityReliability.DERIVED_STRONG,
-    }.get(version_source or "", IdentityReliability.UNKNOWN)
+def _basename(path: str) -> str:
+    """Pure string basename of a captured path.
+
+    The fact layer must stay pure (no ``os`` import), so this is a plain
+    string split over the already-captured observation.
+    """
+    return path.rsplit("/", 1)[-1]
 
 
-def _family_version(version: str | None) -> str | None:
-    if not version:
+def _load_name(candidate: RuntimeLibraryCandidate) -> str:
+    """The exact observed lookup-name identity (R1 plan §5).
+
+    Filesystem candidates: the observed path's basename, verbatim.
+    ldconfig rows: the cache-advertised name (``soname`` in the raw
+    candidate) — the authoritative observed lookup-name field there.
+    Never normalized; never a directory path.
+    """
+    return candidate.soname or _basename(candidate.path)
+
+
+def _target_family_version(candidate: RuntimeLibraryCandidate) -> str | None:
+    """Family of the canonical target's basename (R1 plan §7 invariant).
+
+    Non-null ONLY when: (1) ``canonical_path`` is non-null under the
+    collector's strengthened strict-resolvability invariant (dangling /
+    failed resolution was already collapsed to ``None`` during
+    collection); (2) the canonical target's basename belongs to the SAME
+    supported family as the candidate; (3) its numeric family component
+    is unambiguous (the frozen grammar's single deterministic parse).
+    Otherwise ``None`` — and NEVER the load-name family as a fallback:
+    pretending an unverified target was verified would destroy
+    misleading-alias detection.
+    """
+    if not candidate.canonical_path:
         return None
-    return version.split(".")[0]
+    target_name = _basename(candidate.canonical_path)
+    if family_for_filename(target_name) != candidate.family:
+        return None
+    return family_version_from_name(target_name)
+
+
+def _runtime_identity_reliability(
+    load_name_family_version: str | None,
+    target_family_version: str | None,
+) -> IdentityReliability:
+    """R1 reliability (amendment §8) — ONE narrow purpose: it qualifies
+    the observed family identity used by family-baseline derivation.
+    DIRECT when the observed name claims the family; DERIVED_STRONG when
+    a bare name's reliably derived canonical target does; UNKNOWN when
+    neither — the candidate contributes to no baseline."""
+    if load_name_family_version is not None:
+        return IdentityReliability.DIRECT
+    if target_family_version is not None:
+        return IdentityReliability.DERIVED_STRONG
+    return IdentityReliability.UNKNOWN
+
+
+def _candidate_fact(
+    candidate: RuntimeLibraryCandidate,
+    selectors: Sequence[ToolkitSelectorFact],
+) -> RuntimeLibraryCandidateFact:
+    """Normalize one raw candidate to the R1 split-identity contract."""
+    load_name = _load_name(candidate)
+    load_name_family_version = family_version_from_name(load_name)
+    target_family_version = _target_family_version(candidate)
+    return RuntimeLibraryCandidateFact(
+        family=candidate.family,
+        load_name=load_name,
+        load_name_family_version=load_name_family_version,
+        target_family_version=target_family_version,
+        reliability=_runtime_identity_reliability(
+            load_name_family_version, target_family_version
+        ),
+        origin=candidate.origin,
+        active_toolkit=_toolkit_association(candidate, selectors),
+        modeled_search_order=(
+            candidate.search_order
+            if candidate.origin == ORIGIN_LD_LIBRARY_PATH
+            else None
+        ),
+    )
 
 
 def _toolkit_association(
@@ -682,43 +782,53 @@ def _runtime_library_facts(
 ) -> RuntimeLibraryFacts:
     raw_candidates = inventory.candidates if inventory is not None else []
 
-    # All bounded origins keep candidate-level identity; only LDP
-    # candidates may carry the modeled search order — enforced here even
-    # against stray synthetic values, so "candidate exists" is never
-    # silently upgraded to "candidate has loader precedence N".
+    # R1 split-identity normalization from captured observations only —
+    # the raw ``version`` / ``version_source`` fields are no longer
+    # consumed for identity; the name-derived and target-derived fields
+    # are derived directly from the observed/canonical basenames. All
+    # bounded origins keep candidate-level identity; only LDP candidates
+    # may carry the modeled search order — enforced here even against
+    # stray synthetic values, so "candidate exists" is never silently
+    # upgraded to "candidate has loader precedence N".
     candidates = tuple(
         sorted(
             (
-                RuntimeLibraryCandidateFact(
-                    family=candidate.family,
-                    family_version=_family_version(candidate.version),
-                    reliability=_library_reliability(candidate.version_source),
-                    origin=candidate.origin,
-                    active_toolkit=_toolkit_association(candidate, selectors),
-                    modeled_search_order=(
-                        candidate.search_order
-                        if candidate.origin == ORIGIN_LD_LIBRARY_PATH
-                        else None
-                    ),
-                )
+                _candidate_fact(candidate, selectors)
                 for candidate in raw_candidates
             ),
+            # Deterministic ordering over bounded normalized fields only —
+            # never the raw path; stable under candidate input reordering.
             key=lambda fact: (
                 fact.family,
                 fact.origin,
-                fact.family_version or "",
+                fact.load_name,
+                fact.load_name_family_version or "",
+                fact.target_family_version or "",
+                fact.reliability.value,
+                fact.active_toolkit.value,
                 fact.modeled_search_order is None,
                 fact.modeled_search_order or 0,
             ),
         )
     )
 
+    # Package-local family-baseline derivation is behavior-preserving
+    # over the split fields (amendment §7): a candidate's observed family
+    # identity is its load-name family when versioned (DIRECT), else its
+    # reliable canonical-target family (DERIVED_STRONG) — e.g. a bare
+    # ``libcudnn.so -> libcudnn.so.9.x`` alias still contributes family
+    # 9. UNKNOWN-identity candidates contribute nothing.
     package_local = [
         c for c in raw_candidates if c.origin == ORIGIN_PYTHON_PACKAGE
     ]
-    cudnn_families = {
-        _family_version(c.version) for c in package_local if c.family == "libcudnn"
-    } - {None}
+    cudnn_families = set()
+    for c in package_local:
+        if c.family != "libcudnn":
+            continue
+        load_name = _load_name(c)
+        identity = family_version_from_name(load_name) or _target_family_version(c)
+        if identity is not None:
+            cudnn_families.add(identity)
     # A single distinct environment-local cuDNN family is the observable
     # baseline; zero or several disagreeing ones mean UNKNOWN (§19.10).
     package_local_cudnn = next(iter(cudnn_families)) if len(cudnn_families) == 1 else None

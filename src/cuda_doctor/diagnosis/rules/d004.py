@@ -13,6 +13,13 @@ HIGH is reserved for future direct loaded-object evidence). Multiplicity
 without modeled precedence stays informational (§19.7); UNKNOWN never
 becomes mismatch (§19.5). The rule is pure over ``DiagnosisFacts`` — no
 collection, no host state, no ELF inspection.
+
+TRANSITIONAL R1 STATUS: this module still implements the OLD, NOT-ACCEPTED
+Phase-8 family-level rule. R1 migrated the underlying fact contract to the
+split identity (``load_name`` / ``load_name_family_version`` /
+``target_family_version``) and keeps this rule alive ONLY through the
+private ``_legacy_family_version`` compatibility helper (plan §14). The
+frozen Revision-3 Class A/B rewrite happens in R2 and deletes that helper.
 """
 
 from __future__ import annotations
@@ -62,9 +69,32 @@ _BASELINE_ORIGIN = "python_package"
 # Version identities reliable enough to support a modeled conflict claim
 # (semantics §23.7 "with reliable version identities"). Weakly derived or
 # unknown identities cannot prove which family a candidate belongs to.
+#
+# TRANSITIONAL R1 LEGACY — DELETE IN R2: this check and every use of
+# ``_legacy_family_version`` below keep the OLD, NOT-ACCEPTED Phase-8
+# family-level rule mechanically testable after the R1 fact-shape
+# migration. R2's Class A/B rewrite replaces the whole predicate and
+# removes them.
 _RELIABLE_RELIABILITIES = frozenset(
     (IdentityReliability.DIRECT, IdentityReliability.DERIVED_STRONG)
 )
+
+
+def _legacy_family_version(candidate: RuntimeLibraryCandidateFact) -> str | None:
+    """TRANSITIONAL R1 COMPATIBILITY — DELETE IN R2.
+
+    The old Phase-8 rule (reviewed and NOT accepted; superseded in place
+    by the R2 rewrite) reasons over the removed conflated
+    ``family_version`` identity. This private helper reproduces that old
+    filename-first / target-second identity from the new split fields
+    closely enough to keep the transitional rule importable, type-correct,
+    and testable until R2 — nothing else may consume it, it is never
+    exposed in ``DiagnosisFacts``, and it is NOT the new Revision-3
+    semantics.
+    """
+    if candidate.load_name_family_version is not None:
+        return candidate.load_name_family_version
+    return candidate.target_family_version
 
 
 class D004RuntimeLibraryConflict:
@@ -147,9 +177,13 @@ def _reliably_known(candidate: RuntimeLibraryCandidateFact) -> bool:
 
     An absent version or a weakly/unknown-derived identity is not a
     comparable identity: known-vs-unknown never becomes mismatch.
+
+    TRANSITIONAL R1 LEGACY — DELETE IN R2 (reads the compatibility
+    identity; the R2 Class A/B predicate does not use reliability this
+    way).
     """
     return (
-        candidate.family_version is not None
+        _legacy_family_version(candidate) is not None
         and candidate.reliability in _RELIABLE_RELIABILITIES
     )
 
@@ -176,7 +210,8 @@ def _baseline(family: str, libraries: RuntimeLibraryFacts) -> str | None:
     if not libraries.torch_runtime_family:
         return None
     observed = {
-        candidate.family_version
+        # TRANSITIONAL R1 LEGACY — DELETE IN R2 (compatibility identity).
+        _legacy_family_version(candidate)
         for candidate in libraries.candidates
         if candidate.family == family
         and candidate.origin == _BASELINE_ORIGIN
@@ -216,7 +251,8 @@ def _family_finding(family: str, libraries: RuntimeLibraryFacts) -> _FamilyFindi
         },
         key=lambda candidate: (
             candidate.modeled_search_order or 0,
-            candidate.family_version or "",
+            # TRANSITIONAL R1 LEGACY — DELETE IN R2.
+            _legacy_family_version(candidate) or "",
         ),
     )
     if not modeled:
@@ -233,13 +269,13 @@ def _family_finding(family: str, libraries: RuntimeLibraryFacts) -> _FamilyFindi
         # The preferred candidate's family is not reliably identifiable;
         # skipping it would fabricate precedence for the next entry.
         return None
-    if preferred.family_version == baseline:
+    if _legacy_family_version(preferred) == baseline:
         # The expected family is what the modeled order prefers (§19.7
         # N01-N03: matching copies, however many, are no conflict).
         return None
     expected_later = any(
         (candidate.modeled_search_order or 0) > earliest_order
-        and candidate.family_version == baseline
+        and _legacy_family_version(candidate) == baseline
         and _reliably_known(candidate)
         for candidate in modeled
     )
@@ -260,7 +296,8 @@ def _summary(findings: Sequence[_FamilyFinding]) -> str:
     claim about which object any process actually loaded.
     """
     described = ", ".join(
-        f"{finding.family} family {finding.preferred.family_version} "
+        # TRANSITIONAL R1 LEGACY — DELETE IN R2 (compatibility identity).
+        f"{finding.family} family {_legacy_family_version(finding.preferred)} "
         f"(expected family {finding.baseline})"
         for finding in findings
     )
@@ -288,7 +325,8 @@ def _evidence(findings: Sequence[_FamilyFinding]) -> list[EvidenceItem]:
             EvidenceItem(
                 key=f"{finding.family}_conflicting",
                 value=(
-                    f"family {preferred.family_version} at "
+                    # TRANSITIONAL R1 LEGACY — DELETE IN R2.
+                    f"family {_legacy_family_version(preferred)} at "
                     f"LD_LIBRARY_PATH entry {preferred.modeled_search_order} "
                     f"({preferred.reliability.value})"
                 ),

@@ -38,7 +38,7 @@ yields an identical result.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 from cuda_doctor.core.enums import Severity
 from cuda_doctor.diagnosis.models import (
@@ -148,10 +148,20 @@ def _ranking_key(
     """The frozen §12.1-§12.6 comparison key, smallest first.
 
     The two boolean dimensions invert (``not``) so True ranks first;
-    the rank maps order the frozen enumerations; the trailing code and
-    title make the order total so pathological duplicate-code inputs
-    stay deterministic under permutation (the trailing fields never
-    decide anything for real v0.2.0 inputs, which have unique codes).
+    the rank maps order the frozen enumerations. Everything through
+    §12.6 is the frozen production ranking and is preserved exactly.
+
+    The trailing code, title, and payload fingerprint are the
+    duplicate-code fallback only: two same-code candidates that tie on
+    every frozen dimension are separated by title, then by a full
+    non-ranking payload fingerprint, so the key is a genuine total
+    order and no outcome ever depends on input order (plan §24/§25:
+    duplicates are retained and deterministically degraded, never
+    decided silently by position). These trailing fields sit strictly
+    after the frozen dimensions and never decide anything for real
+    v0.2.0 inputs, which have unique codes; the fingerprint is payload
+    serialization, not a ranking criterion, so no free-form text
+    influences the frozen ranking itself (plan §18.4/§18.10).
     """
     diagnosis = candidate.diagnosis
     return (
@@ -163,7 +173,21 @@ def _ranking_key(
         _CODE_RANK.get(diagnosis.code, _UNKNOWN_CODE_RANK),  # §12.6
         diagnosis.code,
         diagnosis.title,
+        _payload_fingerprint(diagnosis),
     )
+
+
+def _payload_fingerprint(diagnosis: Diagnosis) -> str:
+    """A deterministic rendering of the entire non-ranking payload.
+
+    Only reachable as the final duplicate-code tie-break, after code
+    and title have also tied: the serialized payload distinguishes any
+    two candidates that are not fully equal, making the ranking key a
+    total order. ``role`` is neutralized first so a malformed pre-set
+    role cannot influence ordering; distinct payloads yield distinct
+    renderings because the dataclass field order is fixed.
+    """
+    return repr(asdict(replace(diagnosis, role=None)))
 
 
 def _primary_eligible(candidate: DiagnosisCandidate) -> bool:

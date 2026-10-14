@@ -882,6 +882,59 @@ class TestDuplicateCodes:
             ("D001", DiagnosisRole.POSSIBLE),
         ]
 
+    def test_same_title_different_payload_is_permutation_invariant(self):
+        # Maintainer-review regression: identical code, title, and every
+        # frozen ranking dimension (same confidence, severity, and
+        # SAFE-command remediation state), differing only in non-ranking
+        # payload (summary + remediation prose). code+title alone is not
+        # a total order — the payload fingerprint decides deterministically
+        # so input order never picks which payload becomes PRIMARY.
+        def twin(tag: str) -> DiagnosisCandidate:
+            return candidate(
+                "D001",
+                title="same title",
+                summary=f"payload {tag}",
+                steps=[
+                    RemediationStep(
+                        action=f"act {tag}",
+                        why="because",
+                        safety=RemediationSafety.SAFE,
+                    )
+                ],
+            )
+
+        alpha, beta = twin("alpha"), twin("beta")
+        forward = resolve(alpha, beta)
+        reverse = resolve(beta, alpha)
+        assert forward == reverse
+        assert order(forward) == [
+            ("D001", DiagnosisRole.PRIMARY),
+            ("D001", DiagnosisRole.SECONDARY),
+        ]
+        # The concrete payload receiving each role is fixed in both
+        # orders: the lexically smaller serialized payload ("payload
+        # alpha") is always the PRIMARY, never the input-first one.
+        assert forward[0].summary == "payload alpha"
+        assert forward[1].summary == "payload beta"
+        assert reverse[0].summary == "payload alpha"
+        assert reverse[1].summary == "payload beta"
+
+    def test_fully_identical_duplicates_remain_deterministic(self):
+        # Fully equal duplicates tie on the complete key including the
+        # fingerprint: either object may be min()'s pick, but the
+        # finalized outputs are equal either way — deterministic, stable,
+        # and no crash.
+        a = candidate("D001", title="same title")
+        b = candidate("D001", title="same title")
+        forward = resolve(a, b)
+        reverse = resolve(b, a)
+        assert forward == reverse
+        assert order(forward) == [
+            ("D001", DiagnosisRole.PRIMARY),
+            ("D001", DiagnosisRole.SECONDARY),
+        ]
+        assert resolve(a, b) == forward  # stable across repeated resolution
+
 
 # -- cycles (plan §26) -----------------------------------------------------------------------------
 

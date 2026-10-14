@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-14
+
+Root-cause diagnosis layer: cuda-doctor now explains *why* a CUDA/PyTorch
+environment fails, not only what it observed.
+
+### Added
+
+- Structured root-cause diagnosis layer on top of the existing checks:
+  normalized diagnosis facts, deterministic diagnosis rules, a resolver
+  that assigns global roles, and diagnosis output in every reporter.
+- `D001` — CUDA Toolkit Resolution Conflict: the *active* CUDA development
+  selectors (e.g. `CUDA_HOME`, `CUDACXX`, `nvcc` on `PATH`) disagree on a
+  toolkit version. Multiple coexisting installations alone are not a
+  conflict.
+- `D002` — PyTorch / Local Toolkit Build Mismatch: the PyTorch build's
+  CUDA version conflicts materially with the active local development
+  toolchain in an extension/development context. Wheel-only runtime use
+  is not flagged (a local toolkit still does not have to match PyTorch).
+- `D003` — PyTorch CUDA Unavailable: explains an observed
+  `torch.cuda.is_available() == False` when enough evidence exists
+  (CPU-only wheel, no visible GPU, unusable or incompatible driver,
+  runtime-library conflict, explicit visibility mask); when the evidence
+  is insufficient the cause is reported conservatively as unknown, never
+  guessed.
+- `D004` — CUDA Runtime Library Conflict (Linux only): bounded static
+  evidence of a runtime-library conflict risk — an exact versioned CUDA
+  library name observed in `LD_LIBRARY_PATH` resolves to a file from an
+  incompatible CUDA family, judged strictly by exact library load names;
+  same-name observations elsewhere (e.g. in the current Python
+  environment) only corroborate the risk. No loader precedence across
+  origins is inferred, and nothing is claimed about which shared object
+  was actually loaded.
+- Deterministic diagnosis roles: each run selects at most one `PRIMARY`
+  root cause, with remaining diagnoses ranked as `CONTRIBUTING`,
+  `POSSIBLE`, or `SECONDARY` and causal relationships preserved.
+- Bounded runtime-library and environment observations required by the
+  diagnoses (Linux runtime-library inventory, CUDA selector provenance,
+  `CUDA_VISIBLE_DEVICES` state, torch CUDA probe state) are collected
+  internally and never dumped into reports.
+- JSON schema v2 diagnosis output: reports carry `diagnoses` and
+  `diagnosis_errors`; every v0.1 key keeps its name and meaning
+  (`schema_version` is now `2`).
+
+### Changed
+
+- Human reports (terminal, Markdown) lead with a Diagnoses section ahead
+  of the low-level issues; healthy runs omit the section entirely.
+- Redundant low-level presentation (`TORCH002` under `D003`, `TORCH004`
+  under `D002`) can be suppressed in the human reports by the explicit
+  diagnosis carrier, while the stored `Issue`s remain intact and the JSON
+  report stays machine-complete.
+- Diagnosis is additive: `Issue` codes and severities, `Summary`, and
+  exit semantics are unchanged; a completed run still exits `0`
+  regardless of findings.
+- Reporting remains strictly read-only.
+
+### Privacy / reliability
+
+- Diagnosis pipeline failures are bounded and do not expose raw exception
+  text (a failing component records a stable key and a bounded message;
+  the rest of the report is still produced).
+- Runtime-library inventory and CUDA probe exception details remain
+  internal and non-serialized.
+- Report redaction (home directory → `~`, usernames → `<user>`) extends
+  across all structured diagnosis text.
+
 ## [0.1.2] - 2026-10-09
 
 Distribution release: PyPI-ready packaging and reproducible publication
@@ -150,7 +216,8 @@ Self-review hardening pass:
 - Internal check errors are keyed by check class, so two checks sharing an
   issue code can no longer overwrite each other's diagnostics.
 
-[Unreleased]: https://github.com/TheManWhoIsStupid/cuda-doctor/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/TheManWhoIsStupid/cuda-doctor/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/TheManWhoIsStupid/cuda-doctor/releases/tag/v0.2.0
 [0.1.2]: https://github.com/TheManWhoIsStupid/cuda-doctor/releases/tag/v0.1.2
 [0.1.1]: https://github.com/TheManWhoIsStupid/cuda-doctor/releases/tag/v0.1.1
 [0.1.0]: https://github.com/TheManWhoIsStupid/cuda-doctor/releases/tag/v0.1.0

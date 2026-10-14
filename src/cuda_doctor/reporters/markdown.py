@@ -8,7 +8,14 @@ from cuda_doctor.core.enums import Severity
 from cuda_doctor.core.models import EnvironmentSnapshot
 from cuda_doctor.diagnosis.engine import DiagnosisResult
 from cuda_doctor.diagnosis.issue import Issue
-from cuda_doctor.reporters.base import Reporter, ReportInputs, format_memory
+from cuda_doctor.diagnosis.models import Diagnosis
+from cuda_doctor.reporters.base import (
+    Reporter,
+    ReportInputs,
+    finalized_diagnoses,
+    format_memory,
+    suppressed_issue_codes,
+)
 from cuda_doctor.utils.redact import redact_text
 from cuda_doctor.version import __version__
 
@@ -21,7 +28,12 @@ _SEVERITY_LABEL = {
 
 
 class MarkdownReporter(Reporter):
-    """Report formatted for GitHub issues, PRs, and documentation."""
+    """Report formatted for GitHub issues, PRs, and documentation.
+
+    Diagnoses mirror the terminal semantic hierarchy (resolver order,
+    PRIMARY first); an issue code explicitly owned by a rendered
+    diagnosis is suppressed from the duplicate top-level issue list only.
+    """
 
     def render(self, inputs: ReportInputs) -> str:
         snapshot, result = inputs.snapshot, inputs.result
@@ -37,9 +49,99 @@ class MarkdownReporter(Reporter):
         add("")
 
         self._environment_overview(snapshot, add)
+        self._diagnoses(result, add)
         self._issues(result, add)
         self._summary(result, add)
         return "\n".join(lines).rstrip() + "\n"
+
+    # -- diagnoses ----------------------------------------------------------
+
+    def _diagnoses(self, result: DiagnosisResult, add: Callable[[str], None]) -> None:
+        """The root-cause layer mirroring the terminal hierarchy.
+
+        Resolver order is preserved (PRIMARY first, no re-sorting). A
+        role-less entry is a pre-resolver candidate that never reaches
+        report output: it is skipped, never given an invented role. The
+        section is omitted entirely on healthy runs with no diagnoses.
+        """
+        rendered = finalized_diagnoses(result.diagnoses)
+        if not rendered:
+            return
+        add("## Diagnoses")
+        add("")
+        for diagnosis in rendered:
+            self._diagnosis(diagnosis, add)
+
+    def _diagnosis(self, diagnosis: Diagnosis, add: Callable[[str], None]) -> None:
+        # Every free-form string is redacted: Markdown is shareable output.
+        role = diagnosis.role.value.upper() if diagnosis.role is not None else ""
+        header = f"`{diagnosis.code}` — {redact_text(diagnosis.title)}"
+        add(f"### {role} · {header}" if role else f"### {header}")
+        add("")
+        meta = [
+            _SEVERITY_LABEL[diagnosis.severity],
+            f"confidence: {diagnosis.confidence.value}",
+        ]
+        if diagnosis.cause_class:
+            meta.append(f"cause: `{redact_text(diagnosis.cause_class)}`")
+        add(" · ".join(meta))
+        add("")
+        if diagnosis.summary:
+            add(redact_text(diagnosis.summary))
+            add("")
+        if diagnosis.evidence:
+            add("**Evidence**")
+            add("")
+            for item in diagnosis.evidence:
+                add(
+                    f"- `{redact_text(item.key)}`: {redact_text(item.value)}"
+                    f" — `{redact_text(item.source)}`"
+                )
+            add("")
+        if diagnosis.impact:
+            add("**Impact**")
+            add("")
+            for affected in diagnosis.impact:
+                add(f"- **{redact_text(affected.scope)}**: {redact_text(affected.status)}")
+            add("")
+        if diagnosis.remediation:
+            add("**Remediation**")
+            add("")
+            for step in diagnosis.remediation:
+                # Display-only commands; the safety label always stays
+                # attached so CAUTION/DESTRUCTIVE can never read as SAFE.
+                line = f"- **{redact_text(step.action)}** *({step.safety.value})*"
+                if step.why:
+                    line = f"{line} — {redact_text(step.why)}"
+                add(line)
+                if step.command:
+                    add(f"  - Command: `{redact_text(step.command)}`")
+            add("")
+        if diagnosis.verification:
+            add("**Verification**")
+            add("")
+            for line in diagnosis.verification:
+                add(f"- `{redact_text(line)}`")
+            add("")
+        if diagnosis.related_issues:
+            add("**Related issues**")
+            add("")
+            for code in diagnosis.related_issues:
+                add(f"- `{redact_text(code)}`")
+            add("")
+        if diagnosis.relationships:
+            add("**Relationships**")
+            add("")
+            for link in diagnosis.relationships:
+                # Rendered verbatim, direction preserved — never reversed.
+                add(f"- `{redact_text(link.kind)}` -> `{redact_text(link.target_code)}`")
+            add("")
+        if diagnosis.exclusions:
+            add("**Exclusions**")
+            add("")
+            for line in diagnosis.exclusions:
+                add(f"- {redact_text(line)}")
+            add("")
 
     # -- sections -----------------------------------------------------------
 
@@ -111,12 +213,17 @@ class MarkdownReporter(Reporter):
 
     def _issues(self, result: DiagnosisResult, add: Callable[[str], None]) -> None:
         add("## Potential Issues")
+        # Presentation-only suppression (§25.1/§25.2): codes owned by a
+        # rendered diagnosis drop out of the duplicate top-level display;
+        # the Issues themselves (and the Summary) are never mutated.
+        suppressed = suppressed_issue_codes(result.diagnoses)
+        issues = [issue for issue in result.issues if issue.code not in suppressed]
         add("")
-        if not result.issues:
+        if not issues:
             add("No issues found. ✅")
             add("")
             return
-        for issue in result.issues:
+        for issue in issues:
             self._issue(issue, add)
 
     def _issue(self, issue: Issue, add: Callable[[str], None]) -> None:

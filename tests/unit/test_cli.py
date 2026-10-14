@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 from cuda_doctor import __main__
 from cuda_doctor.cli import app
+from cuda_doctor.version import __version__
 
 runner = CliRunner()
 
@@ -31,7 +32,7 @@ class TestVersionAndHelp:
     def test_version_flag(self):
         result = runner.invoke(app, ["--version"])
         assert result.exit_code == 0
-        assert "cuda-doctor 0.1.2" in result.output
+        assert f"cuda-doctor {__version__}" in result.output
 
     def test_help_lists_commands(self):
         result = runner.invoke(app, ["--help"])
@@ -69,8 +70,25 @@ class TestDiagnose:
         result = runner.invoke(app, ["diagnose", "--format", "json"])
         assert result.exit_code == 0
         payload = json.loads(result.output)
-        assert payload["schema_version"] == 1
+        assert payload["schema_version"] == 2
         assert payload["summary"]["status"] == "HEALTHY"
+
+    def test_json_format_reports_diagnoses_and_keeps_issues(self, fake_collect):
+        # v0.2 schema v2 through the real CLI path: D003 is diagnosed and
+        # TORCH002 stays machine-readable even though terminal/Markdown
+        # presentation would suppress the duplicate issue line.
+        snapshot = base_snapshot()
+        snapshot.pytorch = replace(snapshot.pytorch, cuda_available=False, devices=[])
+        fake_collect(snapshot)
+        result = runner.invoke(app, ["diagnose", "--format", "json"])
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["schema_version"] == 2
+        assert [d["code"] for d in payload["diagnoses"]] == ["D003"]
+        assert payload["diagnoses"][0]["role"] == "primary"
+        assert [issue["code"] for issue in payload["issues"]] == ["TORCH002"]
+        assert payload["summary"]["errors"] == 1
+        assert payload["diagnosis_errors"] == {}
 
     def test_markdown_format(self, fake_collect):
         fake_collect(base_snapshot())
@@ -123,7 +141,7 @@ class TestInfo:
     def test_info_output(self):
         result = runner.invoke(app, ["info"])
         assert result.exit_code == 0
-        assert "cuda-doctor 0.1.2" in result.output
+        assert f"cuda-doctor {__version__}" in result.output
         assert "Diagnostic checks: 24" in result.output
         assert "Read-only" in result.output
 
@@ -138,7 +156,7 @@ class TestModuleInvocation:
             timeout=60,
         )
         assert proc.returncode == 0
-        assert "cuda-doctor 0.1.2" in proc.stdout
+        assert f"cuda-doctor {__version__}" in proc.stdout
 
     def test_main_module_exports_main(self):
         assert callable(__main__.main)

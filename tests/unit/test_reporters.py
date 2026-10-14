@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import io
 import json
 from dataclasses import replace
@@ -10,8 +11,27 @@ import pytest
 from rich.console import Console
 from tests.factories import base_snapshot
 
+from cuda_doctor.collectors.cuda import VERSION_SOURCE_DIRECT
+from cuda_doctor.collectors.runtime_libraries import ORIGIN_LD_LIBRARY_PATH
 from cuda_doctor.core.enums import EnvironmentStatus, Severity
-from cuda_doctor.diagnosis.engine import DiagnosisEngine
+from cuda_doctor.core.models import (
+    CUDAInstallation,
+    CUDASelectorObservation,
+    RuntimeLibraryCandidate,
+    RuntimeLibraryInventory,
+)
+from cuda_doctor.diagnosis.engine import DiagnosisEngine, DiagnosisResult
+from cuda_doctor.diagnosis.issue import Issue, Summary
+from cuda_doctor.diagnosis.models import (
+    Confidence,
+    Diagnosis,
+    DiagnosisRelationship,
+    DiagnosisRole,
+    EvidenceItem,
+    ImpactItem,
+    RemediationSafety,
+    RemediationStep,
+)
 from cuda_doctor.reporters import (
     SCHEMA_VERSION,
     JsonReporter,
@@ -19,8 +39,28 @@ from cuda_doctor.reporters import (
     ReportInputs,
     TerminalReporter,
 )
+from cuda_doctor.reporters.base import suppressed_issue_codes
+from cuda_doctor.version import __version__
 
 GENERATED_AT = "2026-10-08T12:00:00+00:00"
+
+DIAGNOSIS_FIELD_NAMES = {
+    "code",
+    "title",
+    "severity",
+    "confidence",
+    "role",
+    "summary",
+    "cause_class",
+    "evidence",
+    "impact",
+    "remediation",
+    "verification",
+    "related_issues",
+    "relationships",
+    "exclusions",
+    "presentation_suppressed_issue_codes",
+}
 
 
 def inputs_for(snapshot) -> ReportInputs:
@@ -54,6 +94,144 @@ def torch_import_error_inputs() -> ReportInputs:
         devices=[],
     )
     return inputs_for(snapshot)
+
+
+# -- v0.2 diagnosis fixtures ------------------------------------------------
+
+def _selector(name: str, root: str, version: str) -> CUDASelectorObservation:
+    """A valid, direct, canonical-rooted selector observation."""
+    return CUDASelectorObservation(
+        name=name,
+        raw_value=root,
+        resolved_path=f"{root}/bin/nvcc",
+        canonical_path=f"{root}/bin/nvcc",
+        canonical_root=root,
+        toolkit_version=version,
+        exists=True,
+        valid=True,
+        version_source=VERSION_SOURCE_DIRECT,
+    )
+
+
+def _row_c_inventory() -> RuntimeLibraryInventory:
+    """The canonical Revision-3 Class-A row-C D004 inventory (LDP shadowing)."""
+    return RuntimeLibraryInventory(
+        candidates=[
+            RuntimeLibraryCandidate(
+                family="libcudart",
+                path="/opt/inv/libcudart.so.12",
+                canonical_path="/opt/inventory/libcudart.so.11.8.89",
+                version="12",
+                version_source="filename",
+                origin=ORIGIN_LD_LIBRARY_PATH,
+                search_order=0,
+            ),
+            RuntimeLibraryCandidate(
+                family="libcudart",
+                path="/opt/inv2/libcudart.so.12",
+                canonical_path="/opt/inventory/libcudart.so.12",
+                version="12",
+                version_source="filename",
+                origin=ORIGIN_LD_LIBRARY_PATH,
+                search_order=1,
+            ),
+        ],
+        scan_errors={},
+    )
+
+
+def d001_snapshot():
+    """Two participating direct selectors resolving to different toolkits."""
+    snapshot = base_snapshot()
+    snapshot.cuda = replace(
+        snapshot.cuda,
+        selector_observations=[
+            _selector("cuda_home", "/opt/cuda-11.8", "11.8"),
+            _selector("nvcc", "/usr/local/cuda-12.4", "12.4"),
+        ],
+    )
+    return snapshot
+
+
+def d002_torch004_snapshot():
+    """nvcc reference 11.8 vs the torch cu124 build: D002 + TORCH004 (INFO).
+
+    The toolkit itself reports 11.8 so the TORCH004 issue fires from the
+    same underlying mismatch D002 explains (truth table §17.9).
+    """
+    snapshot = base_snapshot()
+    snapshot.cuda = replace(
+        snapshot.cuda,
+        toolkit_version="11.8",
+        nvcc_path="/usr/local/cuda-11.8/bin/nvcc",
+        cuda_home="/usr/local/cuda-11.8",
+        cuda_home_exists=True,
+        cuda_home_has_nvcc=True,
+        installations=[CUDAInstallation("/usr/local/cuda-11.8", "11.8")],
+        selector_observations=[_selector("nvcc", "/usr/local/cuda-11.8", "11.8")],
+    )
+    return snapshot
+
+
+def d003_snapshot():
+    """CUDA build with cuda_available=False: D003 lands on UNKNOWN (LOW)."""
+    snapshot = base_snapshot()
+    snapshot.pytorch = replace(snapshot.pytorch, cuda_available=False, devices=[])
+    return snapshot
+
+
+def d004_snapshot():
+    snapshot = base_snapshot()
+    snapshot.runtime_libraries = _row_c_inventory()
+    return snapshot
+
+
+def critical_snapshot():
+    """The D004 environment with torch CUDA unavailable: D004 PRIMARY and
+    D003 SECONDARY (RUNTIME_LIBRARY_CONFLICT) with explains -> D004."""
+    snapshot = d004_snapshot()
+    snapshot.pytorch = replace(snapshot.pytorch, cuda_available=False, devices=[])
+    return snapshot
+
+
+def make_issue(code: str, severity: Severity = Severity.ERROR) -> Issue:
+    return Issue(code=code, severity=severity, title=f"Issue {code}")
+
+
+def carrier_diagnosis(
+    code: str = "D00X",
+    role: DiagnosisRole | None = DiagnosisRole.PRIMARY,
+    suppressed: tuple[str, ...] = (),
+) -> Diagnosis:
+    return Diagnosis(
+        code=code,
+        title=f"Synthetic {code}",
+        severity=Severity.WARNING,
+        confidence=Confidence.MEDIUM,
+        summary=f"Synthetic summary for {code}.",
+        role=role,
+        presentation_suppressed_issue_codes=list(suppressed),
+    )
+
+
+def synthetic_result(
+    diagnoses: list[Diagnosis] | None = None,
+    issues: list[Issue] | None = None,
+    diagnosis_errors: dict[str, str] | None = None,
+) -> DiagnosisResult:
+    """A finalized result assembled directly for presentation tests."""
+    result = DiagnosisResult()
+    result.issues = issues if issues is not None else []
+    result.diagnoses = diagnoses if diagnoses is not None else []
+    result.summary = Summary.from_issues(result.issues)
+    result.diagnosis_errors = diagnosis_errors if diagnosis_errors is not None else {}
+    return result
+
+
+def synthetic_inputs(result: DiagnosisResult) -> ReportInputs:
+    return ReportInputs(
+        snapshot=base_snapshot(), result=result, generated_at=GENERATED_AT
+    )
 
 
 class TestTerminalReporter:
@@ -213,12 +391,46 @@ class TestJsonReporter:
             snapshot.environment,
             path_entries=[(0, "/home/secretuser/.npm-global/bin"), (1, "/usr/bin")],
             ld_library_path="/home/secretuser/.local/lib:/usr/lib",
+            ld_library_path_entries=[(0, "/home/secretuser/.local/lib"), (1, "/usr/lib")],
+        )
+        # The raw runtime-library inventory (v0.2 Phase 3) joins the same
+        # privacy class: internal state, never serialized into any report.
+        snapshot.runtime_libraries = RuntimeLibraryInventory(
+            candidates=[
+                RuntimeLibraryCandidate(
+                    family="libcudart",
+                    path="/home/secretuser/.local/lib/libcudart.so.12",
+                    version="12",
+                    origin="ld_library_path",
+                    search_order=0,
+                ),
+                RuntimeLibraryCandidate(
+                    family="libcudnn",
+                    path="/secret/diagnosis/libcudnn.so.9",
+                    soname="libcudnn.so.9",
+                    origin="ldconfig",
+                ),
+            ],
+            scan_errors={"/home/secretuser/.local/stale": "FileNotFoundError: gone"},
         )
         payload = JsonReporter.build(inputs_for(snapshot))
         env = payload["environment"]["environment"]
         assert "path_entries" not in env
         assert "ld_library_path" not in env
-        assert ".npm-global" not in JsonReporter().render(inputs_for(snapshot))
+        assert "ld_library_path_entries" not in env
+        assert "runtime_libraries" not in payload["environment"]
+        rendered = JsonReporter().render(inputs_for(snapshot))
+        assert ".npm-global" not in rendered
+        # The ordered entries are popped before redaction, so neither the raw
+        # path nor a "~"-prefixed reconstruction can leak.
+        assert ".local/lib" not in rendered
+        # Neither do inventory candidate paths, scan-error keys, family
+        # listings, or the LD_LIBRARY_PATH roots they would reconstruct.
+        assert "libcudart" not in rendered
+        assert "libcudnn" not in rendered
+        assert ".local/stale" not in rendered
+        assert "/secret/diagnosis" not in rendered
+        assert "ld_library_path" not in env
         # The CUDA-relevant subsets remain.
         assert "cuda_path_entries" in env
 
@@ -230,6 +442,25 @@ class TestJsonReporter:
         rendered = JsonReporter().render(inputs)
         assert "secretuser" not in rendered
         assert "<user>" in rendered or "~" in rendered
+
+    def test_internal_cuda_probe_error_never_serialized(self):
+        # v0.2 pre-Phase-6 follow-up: the bounded probe-failure observation
+        # is internal D003 evidence. JSON schema v1 must not gain the field
+        # — not even as null in a healthy environment — and the private
+        # path inside the captured error must not surface anywhere.
+        snapshot = base_snapshot()
+        snapshot.pytorch = replace(
+            snapshot.pytorch,
+            cuda_available=None,
+            cuda_probe_error="RuntimeError: /home/secretuser/private/path",
+        )
+        payload = JsonReporter.build(inputs_for(snapshot))
+        pytorch = payload["environment"]["pytorch"]
+        assert "cuda_probe_error" not in pytorch
+        assert "import_error" in pytorch  # sibling bounded error stays public
+        rendered = JsonReporter().render(inputs_for(snapshot))
+        assert "cuda_probe_error" not in rendered
+        assert "secretuser" not in rendered
 
 
 class TestMarkdownReporter:
@@ -260,6 +491,568 @@ class TestMarkdownReporter:
         )
         text = MarkdownReporter().render(inputs_for(snapshot))
         assert "secretuser" not in text
+
+
+class TestJsonSchemaV2:
+    """Schema v2: additive diagnosis fields over an unchanged v1 body."""
+
+    def test_schema_version_is_two(self):
+        payload = JsonReporter.build(inputs_for(base_snapshot()))
+        assert SCHEMA_VERSION == 2
+        assert payload["schema_version"] == 2
+
+    def test_top_level_keys_exact_and_ordered(self):
+        payload = JsonReporter.build(inputs_for(critical_snapshot()))
+        assert list(payload) == [
+            "schema_version",
+            "tool",
+            "generated_at",
+            "environment",
+            "issues",
+            "diagnoses",
+            "summary",
+            "check_errors",
+            "diagnosis_errors",
+        ]
+
+    def test_legacy_v1_keys_keep_shape_and_meaning(self):
+        inputs = broken_inputs()
+        payload = JsonReporter.build(inputs)
+        assert payload["tool"] == {"name": "cuda-doctor", "version": __version__}
+        assert payload["generated_at"] == GENERATED_AT
+        assert payload["environment"]["driver"]["version"] == "470.42.01"
+        codes = [issue["code"] for issue in payload["issues"]]
+        assert codes == [issue.code for issue in inputs.result.issues]
+        assert payload["summary"] == inputs.result.summary.to_dict()
+        assert payload["check_errors"] == {}
+
+    def test_healthy_result_has_empty_diagnosis_layers(self):
+        payload = JsonReporter.build(inputs_for(base_snapshot()))
+        assert payload["diagnoses"] == []
+        assert payload["diagnosis_errors"] == {}
+
+    @pytest.mark.parametrize(
+        ("snapshot", "code", "severity", "confidence"),
+        [
+            (d001_snapshot(), "D001", "WARNING", "high"),
+            (d002_torch004_snapshot(), "D002", "WARNING", "high"),
+            (d003_snapshot(), "D003", "ERROR", "low"),
+            (d004_snapshot(), "D004", "WARNING", "medium"),
+        ],
+    )
+    def test_single_diagnosis_serialization(
+        self, snapshot, code, severity, confidence
+    ):
+        inputs = inputs_for(snapshot)
+        payload = JsonReporter.build(inputs)
+        diagnoses = payload["diagnoses"]
+        assert len(diagnoses) == 1
+        dx = diagnoses[0]
+        assert dx["code"] == code
+        assert dx["role"] == "primary"
+        assert dx["severity"] == severity
+        assert dx["confidence"] == confidence
+        # No reporter-side reclassification: the payload mirrors the
+        # finalized objects field by field.
+        assert dx == inputs.result.diagnoses[0].to_dict(redact=True)
+
+    def test_multi_diagnosis_critical_case(self):
+        inputs = inputs_for(critical_snapshot())
+        payload = JsonReporter.build(inputs)
+        assert [(d["code"], d["role"]) for d in payload["diagnoses"]] == [
+            ("D004", "primary"),
+            ("D003", "secondary"),
+        ]
+        assert payload["diagnoses"][0]["severity"] == "WARNING"
+        assert payload["diagnoses"][1]["severity"] == "ERROR"
+
+    def test_every_diagnosis_field_serialized(self):
+        payload = JsonReporter.build(inputs_for(critical_snapshot()))
+        for dx in payload["diagnoses"]:
+            assert set(dx) == DIAGNOSIS_FIELD_NAMES
+
+    def test_relationship_preserved_exactly(self):
+        payload = JsonReporter.build(inputs_for(critical_snapshot()))
+        d003 = next(d for d in payload["diagnoses"] if d["code"] == "D003")
+        assert d003["relationships"] == [{"kind": "explains", "target_code": "D004"}]
+
+    def test_remediation_step_representation(self):
+        payload = JsonReporter.build(inputs_for(critical_snapshot()))
+        for dx in payload["diagnoses"]:
+            for step in dx["remediation"]:
+                assert set(step) == {"action", "why", "safety", "command"}
+                assert step["safety"] in ("safe", "caution", "destructive")
+        # v0.2 rules emit SAFE display-only guidance: commands may be null
+        # but the safety classification always serializes.
+        d004 = payload["diagnoses"][0]
+        assert all(step["safety"] == "safe" for step in d004["remediation"])
+
+    def test_exclusions_serialized_separately_from_evidence(self):
+        payload = JsonReporter.build(inputs_for(d003_snapshot()))
+        dx = payload["diagnoses"][0]
+        assert dx["exclusions"]
+        assert dx["exclusions"] != dx["evidence"]
+        assert all(isinstance(line, str) for line in dx["exclusions"])
+
+    def test_presentation_suppressed_issue_codes_represented(self):
+        payload = JsonReporter.build(inputs_for(d003_snapshot()))
+        assert payload["diagnoses"][0]["presentation_suppressed_issue_codes"] == [
+            "TORCH002"
+        ]
+
+    def test_diagnosis_errors_populated_and_bounded(self):
+        result = DiagnosisEngine().run(base_snapshot())
+        result.diagnosis_errors["D001"] = "RuntimeError: diagnosis component failed"
+        result.diagnosis_errors["resolver"] = "ValueError: diagnosis component failed"
+        result.check_errors["ExplodingCheck"] = "boom"
+        payload = JsonReporter.build(synthetic_inputs(result))
+        assert payload["diagnosis_errors"] == {
+            "D001": "RuntimeError: diagnosis component failed",
+            "resolver": "ValueError: diagnosis component failed",
+        }
+        # A separate layer: never merged into check_errors.
+        assert payload["check_errors"] == {"ExplodingCheck": "boom"}
+
+    def test_private_material_redacted(self, fake_home):
+        secret = "/home/secretuser/private/project"
+        diagnosis = Diagnosis(
+            code="D00X",
+            title="Leaky diagnosis",
+            severity=Severity.WARNING,
+            confidence=Confidence.HIGH,
+            summary=f"conflict under {secret}",
+            role=DiagnosisRole.PRIMARY,
+            cause_class=f"under {secret}",
+            evidence=[EvidenceItem(key="root", value=secret, source="env")],
+            impact=[ImpactItem(scope="build", status=f"broken under {secret}")],
+            remediation=[
+                RemediationStep(
+                    action=f"inspect {secret}",
+                    why=f"because {secret}",
+                    safety=RemediationSafety.CAUTION,
+                    command=f"ls {secret}",
+                )
+            ],
+            verification=[f"check {secret}"],
+            related_issues=["TORCH002"],
+            relationships=[DiagnosisRelationship(kind="explains", target_code="D004")],
+            exclusions=[f"nothing healthy in {secret}"],
+            presentation_suppressed_issue_codes=["TORCH002"],
+        )
+        rendered = JsonReporter().render(
+            synthetic_inputs(synthetic_result(diagnoses=[diagnosis]))
+        )
+        assert "secretuser" not in rendered
+        assert "~" in rendered or "<user>" in rendered
+
+    def test_deterministic_output(self):
+        inputs = inputs_for(critical_snapshot())
+        assert JsonReporter().render(inputs) == JsonReporter().render(inputs)
+
+    def test_no_candidate_hint_fields_leak(self):
+        payload = JsonReporter.build(inputs_for(critical_snapshot()))
+        for dx in payload["diagnoses"]:
+            for hint in ("explains_active_failure", "risk_only", "causal_parent_codes"):
+                assert hint not in dx
+
+    def test_roleless_diagnosis_never_reaches_json_output(self):
+        # Frozen finalized-report boundary: role=None is internal
+        # pre-resolver state, not a fifth role. JSON skips the entry
+        # exactly like the human reporters — never serialized as
+        # "role": null, never given an invented role.
+        diagnosis = carrier_diagnosis(role=None, suppressed=("TORCH002",))
+        payload = JsonReporter.build(synthetic_inputs(synthetic_result([diagnosis])))
+        assert payload["diagnoses"] == []
+        assert diagnosis.role is None  # the stored Diagnosis is untouched
+
+    def test_roleless_diagnosis_skipped_finalized_peers_unchanged(self):
+        roleless = carrier_diagnosis("D00L", role=None)
+        finalized = carrier_diagnosis("D00F", DiagnosisRole.PRIMARY)
+        payload = JsonReporter.build(
+            synthetic_inputs(synthetic_result([roleless, finalized]))
+        )
+        assert [dx["code"] for dx in payload["diagnoses"]] == ["D00F"]
+        assert payload["diagnoses"][0] == finalized.to_dict(redact=True)
+
+
+class TestTerminalDiagnoses:
+    def test_healthy_output_has_no_diagnoses_section(self):
+        text = TerminalReporter().render(inputs_for(base_snapshot()))
+        assert "Diagnoses" not in text
+        assert "no issues found" in text
+
+    def test_diagnoses_section_sits_before_potential_issues(self):
+        text = TerminalReporter().render(inputs_for(critical_snapshot()))
+        assert 0 < text.index("Diagnoses") < text.index("Potential Issues")
+
+    def test_primary_diagnosis_first_resolver_order_preserved(self):
+        text = TerminalReporter().render(inputs_for(critical_snapshot()))
+        assert text.index("CUDA runtime library conflict") < text.index(
+            "PyTorch CUDA unavailable"
+        )
+
+    def test_role_severity_confidence_metadata_line(self):
+        text = TerminalReporter().render(inputs_for(critical_snapshot()))
+        assert "PRIMARY · WARNING · medium confidence" in text
+        assert "SECONDARY · ERROR · medium confidence" in text
+
+    def test_structured_sections_rendered(self):
+        text = TerminalReporter().render(inputs_for(critical_snapshot()))
+        for label in ("Evidence", "Impact", "Remediation", "Verification", "Exclusions"):
+            assert label in text
+        assert "→ " in text  # remediation marker
+        assert "Related issues: TORCH002" in text
+
+    def test_relationship_rendered_without_reversal(self):
+        text = TerminalReporter().render(inputs_for(critical_snapshot()))
+        assert "explains -> D004" in text
+
+    def test_cause_class_rendered_where_present(self):
+        text = TerminalReporter().render(inputs_for(critical_snapshot()))
+        assert "Cause: RUNTIME_LIBRARY_CONFLICT" in text
+
+    def test_remediation_command_and_safety_label(self):
+        diagnosis = Diagnosis(
+            code="D00X",
+            title="Commanded diagnosis",
+            severity=Severity.WARNING,
+            confidence=Confidence.MEDIUM,
+            summary="Synthetic.",
+            role=DiagnosisRole.PRIMARY,
+            remediation=[
+                RemediationStep(
+                    action="Review the change",
+                    why="Careful review first",
+                    safety=RemediationSafety.DESTRUCTIVE,
+                    command="echo review before changing anything",
+                )
+            ],
+        )
+        text = TerminalReporter().render(synthetic_inputs(synthetic_result([diagnosis])))
+        assert "(destructive)" in text  # safety label never dropped
+        assert "$ echo review before changing anything" in text
+
+    def test_unknown_d003_wording_is_conservative(self):
+        text = TerminalReporter().render(inputs_for(d003_snapshot()))
+        assert "Unable to determine the root cause" in text
+        assert "PRIMARY · ERROR · low confidence" in text
+        assert "Cause: UNKNOWN" in text
+
+    def test_all_four_roles_distinguished_in_input_order(self):
+        diagnoses = [
+            carrier_diagnosis("D00P", DiagnosisRole.POSSIBLE),
+            carrier_diagnosis("D00C", DiagnosisRole.CONTRIBUTING),
+            carrier_diagnosis("D00S", DiagnosisRole.SECONDARY),
+            carrier_diagnosis("D00R", DiagnosisRole.PRIMARY),
+        ]
+        text = TerminalReporter().render(synthetic_inputs(synthetic_result(diagnoses)))
+        positions = [text.index(f"Synthetic {d.code}") for d in diagnoses]
+        # No reporter-side sorting: the resolver-provided order is king.
+        assert positions == sorted(positions)
+        for role in ("PRIMARY", "SECONDARY", "CONTRIBUTING", "POSSIBLE"):
+            assert role in text
+
+    def test_info_severity_primary_still_rendered_non_verbose(self):
+        diagnosis = carrier_diagnosis("D00I", DiagnosisRole.PRIMARY)
+        diagnosis = replace(diagnosis, severity=Severity.INFO)
+        text = TerminalReporter(verbose=False).render(
+            synthetic_inputs(synthetic_result([diagnosis]))
+        )
+        assert "D00I" in text and "PRIMARY" in text
+
+    def test_roleless_diagnosis_skipped_not_invented(self):
+        diagnosis = carrier_diagnosis(role=None)
+        text = TerminalReporter().render(synthetic_inputs(synthetic_result([diagnosis])))
+        assert "D00X" not in text
+        assert "Diagnoses" not in text
+
+    def test_torch002_suppressed_from_issue_list_only(self):
+        inputs = inputs_for(critical_snapshot())
+        text = TerminalReporter().render(inputs)
+        # Exactly one presentation: the diagnosis's related-issues line.
+        assert text.count("TORCH002") == 1
+        issues_block = text[text.index("Potential Issues"):text.index("Summary")]
+        assert "TORCH002" not in issues_block
+        assert "no issues found" in issues_block
+        # The stored layer is untouched by rendering.
+        assert [issue.code for issue in inputs.result.issues] == ["TORCH002"]
+        assert inputs.result.summary.errors == 1
+
+    def test_torch004_suppressed_when_d002_rendered(self):
+        inputs = inputs_for(d002_torch004_snapshot())
+        for verbose in (True, False):
+            text = TerminalReporter(verbose=verbose).render(inputs)
+            assert text.count("TORCH004") == 1, verbose  # related-issues line only
+            issues_block = text[text.index("Potential Issues"):text.index("Summary")]
+            assert "TORCH004" not in issues_block
+        assert [i.code for i in inputs.result.issues] == ["TORCH004"]
+
+    def test_suppression_set_is_union_and_duplicate_carriers_inert(self):
+        diagnoses = [
+            carrier_diagnosis("D00A", DiagnosisRole.PRIMARY, ("TORCH002", "GHOST999")),
+            carrier_diagnosis("D00B", DiagnosisRole.SECONDARY, ("TORCH002",)),
+        ]
+        issues = [make_issue("TORCH002"), make_issue("OTHER001", Severity.WARNING)]
+        result = synthetic_result(diagnoses, issues)
+        text = TerminalReporter().render(synthetic_inputs(result))
+        assert "TORCH002" not in text[text.index("Potential Issues"):]
+        assert "OTHER001" in text  # unrelated issues are never suppressed
+        # Absent issue codes cause no error; carriers stay unmutated.
+        assert diagnoses[0].presentation_suppressed_issue_codes == [
+            "TORCH002",
+            "GHOST999",
+        ]
+
+    def test_suppression_requires_a_rendered_carrier(self):
+        diagnosis = carrier_diagnosis(role=None, suppressed=("TORCH002",))
+        result = synthetic_result([diagnosis], [make_issue("TORCH002")])
+        text = TerminalReporter().render(synthetic_inputs(result))
+        assert "TORCH002" in text[text.index("Potential Issues"):]
+
+    def test_diagnosis_errors_verbose_only(self):
+        result = synthetic_result(
+            diagnosis_errors={"D001": "RuntimeError: diagnosis component failed"}
+        )
+        result.check_errors["ExplodingCheck"] = "boom"
+        terse = TerminalReporter(verbose=False).render(synthetic_inputs(result))
+        assert "diagnosis component failed" not in terse
+        verbose = TerminalReporter(verbose=True).render(synthetic_inputs(result))
+        assert "Internal Diagnostics" in verbose
+        assert "D001" in verbose
+        assert "diagnosis component failed" in verbose
+        assert "ExplodingCheck" in verbose  # check layer stays distinct but co-shown
+
+    def test_private_diagnosis_title_redacted(self, fake_home):
+        # Maintainer-review blocker regression: the TITLE itself carries
+        # the private path — the presentation boundary must redact it
+        # like every other free-form diagnosis string.
+        secret = "/home/secretuser/private/project"
+        diagnosis = Diagnosis(
+            code="D00X",
+            title=f"Conflict under {secret}",
+            severity=Severity.WARNING,
+            confidence=Confidence.HIGH,
+            summary="Synthetic.",
+            role=DiagnosisRole.PRIMARY,
+        )
+        text = TerminalReporter().render(synthetic_inputs(synthetic_result([diagnosis])))
+        assert "secretuser" not in text
+        assert "D00X" in text  # redaction never hides the diagnosis itself
+        assert "~" in text or "<user>" in text
+
+    def test_private_diagnosis_text_redacted(self, fake_home):
+        secret = "/home/secretuser/private/project"
+        diagnosis = Diagnosis(
+            code="D00X",
+            title="Leaky",
+            severity=Severity.WARNING,
+            confidence=Confidence.HIGH,
+            summary=f"conflict under {secret}",
+            role=DiagnosisRole.PRIMARY,
+            evidence=[EvidenceItem(key="root", value=secret, source="env")],
+            remediation=[
+                RemediationStep(
+                    action=f"inspect {secret}",
+                    why="why",
+                    safety=RemediationSafety.SAFE,
+                    command=f"ls {secret}",
+                )
+            ],
+            verification=[f"check {secret}"],
+            exclusions=[f"nothing healthy in {secret}"],
+        )
+        text = TerminalReporter().render(synthetic_inputs(synthetic_result([diagnosis])))
+        assert "secretuser" not in text
+
+    def test_render_is_pure_with_respect_to_the_result(self):
+        inputs = inputs_for(critical_snapshot())
+        before = copy.deepcopy(inputs.result)
+        TerminalReporter(verbose=True).render(inputs)
+        assert inputs.result == before
+
+
+class TestMarkdownDiagnoses:
+    def test_healthy_output_has_no_diagnoses_section(self):
+        text = MarkdownReporter().render(inputs_for(base_snapshot()))
+        assert "Diagnoses" not in text
+        assert "No issues found" in text
+
+    def test_section_hierarchy_and_order(self):
+        text = MarkdownReporter().render(inputs_for(critical_snapshot()))
+        assert (
+            text.index("## Environment Overview")
+            < text.index("## Diagnoses")
+            < text.index("## Potential Issues")
+            < text.index("## Summary")
+        )
+        assert text.index("`D004` — CUDA runtime library conflict") < text.index(
+            "`D003` — PyTorch CUDA unavailable"
+        )
+
+    def test_role_headings(self):
+        text = MarkdownReporter().render(inputs_for(critical_snapshot()))
+        assert "### PRIMARY · `D004` — CUDA runtime library conflict" in text
+        assert "### SECONDARY · `D003` — PyTorch CUDA unavailable" in text
+
+    def test_structured_content(self):
+        text = MarkdownReporter().render(inputs_for(critical_snapshot()))
+        for header in (
+            "**Evidence**",
+            "**Impact**",
+            "**Remediation**",
+            "**Verification**",
+            "**Related issues**",
+            "**Relationships**",
+            "**Exclusions**",
+        ):
+            assert header in text
+        assert "confidence: medium" in text
+        assert "cause: `RUNTIME_LIBRARY_CONFLICT`" in text
+        assert "`explains` -> `D004`" in text
+
+    def test_remediation_safety_label_and_command(self):
+        diagnosis = Diagnosis(
+            code="D00X",
+            title="Commanded",
+            severity=Severity.WARNING,
+            confidence=Confidence.MEDIUM,
+            summary="Synthetic.",
+            role=DiagnosisRole.PRIMARY,
+            remediation=[
+                RemediationStep(
+                    action="Review the change",
+                    why="Careful review first",
+                    safety=RemediationSafety.CAUTION,
+                    command="echo review before changing anything",
+                )
+            ],
+        )
+        text = MarkdownReporter().render(synthetic_inputs(synthetic_result([diagnosis])))
+        assert "*(caution)*" in text
+        assert "Command: `echo review before changing anything`" in text
+
+    def test_unknown_d003_wording(self):
+        text = MarkdownReporter().render(inputs_for(d003_snapshot()))
+        assert "Unable to determine the root cause" in text
+        assert "confidence: low" in text
+
+    def test_roles_in_input_order(self):
+        diagnoses = [
+            carrier_diagnosis("D00P", DiagnosisRole.POSSIBLE),
+            carrier_diagnosis("D00C", DiagnosisRole.CONTRIBUTING),
+            carrier_diagnosis("D00S", DiagnosisRole.SECONDARY),
+            carrier_diagnosis("D00R", DiagnosisRole.PRIMARY),
+        ]
+        text = MarkdownReporter().render(synthetic_inputs(synthetic_result(diagnoses)))
+        positions = [text.index(f"Synthetic {d.code}") for d in diagnoses]
+        assert positions == sorted(positions)
+
+    def test_roleless_diagnosis_skipped(self):
+        diagnosis = carrier_diagnosis(role=None)
+        text = MarkdownReporter().render(synthetic_inputs(synthetic_result([diagnosis])))
+        assert "D00X" not in text
+        assert "## Diagnoses" not in text
+
+    def test_suppression_requires_a_rendered_carrier(self):
+        # A skipped role-less diagnosis is not rendered, so its carrier
+        # never activates human issue suppression (§25.2) — the twin of
+        # the terminal regression.
+        diagnosis = carrier_diagnosis(role=None, suppressed=("TORCH002",))
+        result = synthetic_result([diagnosis], [make_issue("TORCH002")])
+        text = MarkdownReporter().render(synthetic_inputs(result))
+        assert "### 🔴 ERROR · `TORCH002`" in text
+
+    def test_torch002_suppressed_from_issue_list_only(self):
+        inputs = inputs_for(critical_snapshot())
+        text = MarkdownReporter().render(inputs)
+        assert text.count("TORCH002") == 1  # the diagnosis related-issues entry
+        assert "### 🔴 ERROR · `TORCH002`" not in text
+        assert [issue.code for issue in inputs.result.issues] == ["TORCH002"]
+        assert "**Status: DEGRADED**" in text  # Summary stays issue-derived
+
+    def test_torch004_suppressed_when_d002_rendered(self):
+        inputs = inputs_for(d002_torch004_snapshot())
+        text = MarkdownReporter().render(inputs)
+        assert text.count("TORCH004") == 1
+        assert "### 🔵 INFO · `TORCH004`" not in text
+        assert [i.code for i in inputs.result.issues] == ["TORCH004"]
+
+    def test_private_diagnosis_title_redacted(self, fake_home):
+        # Maintainer-review blocker regression: the TITLE itself carries
+        # the private path — the shareable-output boundary must redact it
+        # like every other free-form diagnosis string.
+        secret = "/home/secretuser/private/project"
+        diagnosis = Diagnosis(
+            code="D00X",
+            title=f"Conflict under {secret}",
+            severity=Severity.WARNING,
+            confidence=Confidence.HIGH,
+            summary="Synthetic.",
+            role=DiagnosisRole.PRIMARY,
+        )
+        text = MarkdownReporter().render(synthetic_inputs(synthetic_result([diagnosis])))
+        assert "secretuser" not in text
+        assert "`D00X`" in text  # redaction never hides the diagnosis itself
+        assert "~" in text or "<user>" in text
+
+    def test_private_diagnosis_text_redacted(self, fake_home):
+        secret = "/home/secretuser/private/project"
+        diagnosis = Diagnosis(
+            code="D00X",
+            title="Leaky",
+            severity=Severity.WARNING,
+            confidence=Confidence.HIGH,
+            summary=f"conflict under {secret}",
+            role=DiagnosisRole.PRIMARY,
+            evidence=[EvidenceItem(key="root", value=secret, source="env")],
+            verification=[f"check {secret}"],
+            exclusions=[f"nothing healthy in {secret}"],
+        )
+        text = MarkdownReporter().render(synthetic_inputs(synthetic_result([diagnosis])))
+        assert "secretuser" not in text
+
+    def test_render_is_pure(self):
+        inputs = inputs_for(critical_snapshot())
+        before = copy.deepcopy(inputs.result)
+        MarkdownReporter().render(inputs)
+        assert inputs.result == before
+
+
+class TestSuppressionIsPresentationOnly:
+    """The frozen invariant trio: issues, carrier, and Summary survive."""
+
+    def test_all_reporters_leave_stored_state_untouched(self):
+        inputs = inputs_for(critical_snapshot())
+        before = copy.deepcopy(inputs.result)
+        TerminalReporter().render(inputs)
+        MarkdownReporter().render(inputs)
+        JsonReporter().render(inputs)
+        assert inputs.result == before
+        carrier = inputs.result.diagnoses[1].presentation_suppressed_issue_codes
+        assert carrier == ["TORCH002"]
+        assert inputs.result.summary == Summary.from_issues(inputs.result.issues)
+
+    def test_json_keeps_suppressed_issue_machine_readable(self):
+        inputs = inputs_for(critical_snapshot())
+        json_text = JsonReporter().render(inputs)
+        payload = json.loads(json_text)
+        assert [issue["code"] for issue in payload["issues"]] == ["TORCH002"]
+        assert payload["summary"]["errors"] == 1
+
+    def test_suppressed_issue_codes_helper_reads_only_the_carrier(self):
+        d003 = carrier_diagnosis("D003", DiagnosisRole.PRIMARY, ("TORCH002",))
+        assert suppressed_issue_codes([d003]) == {"TORCH002"}
+        # Inference-free: none of the other diagnosis dimensions suppress.
+        inference_only = Diagnosis(
+            code="D009",
+            title="TORCH002 everywhere",
+            severity=Severity.ERROR,
+            confidence=Confidence.HIGH,
+            summary="TORCH002",
+            role=DiagnosisRole.PRIMARY,
+            related_issues=["TORCH002"],
+        )
+        assert suppressed_issue_codes([inference_only]) == set()
 
 
 @pytest.mark.parametrize(

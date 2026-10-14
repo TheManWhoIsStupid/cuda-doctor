@@ -142,8 +142,11 @@ def patch_executables(monkeypatch):
         def lookup(name):
             return paths.get(name)
 
+        def lookup_on_path(name, entries):
+            return paths.get(name)
+
         monkeypatch.setattr("cuda_doctor.collectors.find_executable", lookup)
-        monkeypatch.setattr("cuda_doctor.collectors.cuda.find_executable", lookup)
+        monkeypatch.setattr("cuda_doctor.collectors.cuda.find_executable_on_path", lookup_on_path)
         monkeypatch.setattr("cuda_doctor.collectors.nvidia_smi.find_executable", lookup)
 
     return _install

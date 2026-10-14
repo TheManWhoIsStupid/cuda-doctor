@@ -9,7 +9,14 @@ from rich.console import Console
 from cuda_doctor.core.enums import EnvironmentStatus, Severity
 from cuda_doctor.core.models import EnvironmentSnapshot
 from cuda_doctor.diagnosis.engine import DiagnosisResult
-from cuda_doctor.reporters.base import Reporter, ReportInputs, format_memory
+from cuda_doctor.diagnosis.models import Diagnosis
+from cuda_doctor.reporters.base import (
+    Reporter,
+    ReportInputs,
+    finalized_diagnoses,
+    format_memory,
+    suppressed_issue_codes,
+)
 from cuda_doctor.utils.redact import redact_text
 from cuda_doctor.utils.versions import CudaVersion, parse_cuda_version
 from cuda_doctor.version import __version__
@@ -34,6 +41,9 @@ class TerminalReporter(Reporter):
 
     With ``verbose=False`` info-level notes are summarized away and internal
     probe failures are hidden (they remain in the JSON report regardless).
+    Diagnoses render in both modes, in resolver order (PRIMARY first); an
+    issue code explicitly owned by a rendered diagnosis is suppressed from
+    the duplicate top-level issue list only — never from the data layer.
     """
 
     def __init__(self, console: Console | None = None, verbose: bool = True) -> None:
@@ -76,6 +86,7 @@ class TerminalReporter(Reporter):
         self._toolchain(console, snapshot)
         self._environment(console, snapshot)
         self._compatibility(console, snapshot, marks)
+        self._diagnoses(console, result, marks)
         self._issues(console, result, marks)
         self._internal_errors(console, snapshot, result, marks)
         self._summary(console, result, marks)
@@ -271,16 +282,109 @@ class TerminalReporter(Reporter):
             )
         console.print()
 
+    def _diagnoses(
+        self, console: Console, result: DiagnosisResult, marks: dict[str, str]
+    ) -> None:
+        """The v0.2 root-cause layer, in resolver order (never re-sorted).
+
+        Rendered ahead of the low-level issue list so the PRIMARY
+        diagnosis leads the user-facing report. Role-less entries are
+        pre-resolver candidates that never reach report output: they are
+        skipped here, never given an invented role label. Every
+        free-form diagnosis string passes through ``redact_text`` —
+        defense-in-depth on top of the bounded, presentation-safe text
+        the accepted rules already emit.
+        """
+        rendered = finalized_diagnoses(result.diagnoses)
+        if not rendered:
+            # No noise on healthy runs: the section itself is omitted.
+            return
+        self._section(console, "Diagnoses")
+        for diagnosis in rendered:
+            self._diagnosis(console, diagnosis, marks)
+
+    def _diagnosis(
+        self, console: Console, diagnosis: Diagnosis, marks: dict[str, str]
+    ) -> None:
+        mark = marks[_SEVERITY_MARK[diagnosis.severity]]
+        console.print(
+            f"  {mark} [bold]{diagnosis.code}[/bold]  {redact_text(diagnosis.title)}"
+        )
+        if diagnosis.role is not None:
+            console.print(
+                f"      [dim]{diagnosis.role.value.upper()}"
+                f" · {diagnosis.severity.value}"
+                f" · {diagnosis.confidence.value} confidence[/dim]"
+            )
+        if diagnosis.summary:
+            console.print(f"      {redact_text(diagnosis.summary)}")
+        if diagnosis.cause_class:
+            console.print(
+                f"      [dim]Cause:[/dim] {redact_text(diagnosis.cause_class)}"
+            )
+        if diagnosis.evidence:
+            console.print("      [dim]Evidence[/dim]")
+            for item in diagnosis.evidence:
+                console.print(
+                    f"      [dim]· {redact_text(item.key)}: {redact_text(item.value)}"
+                    f" ({redact_text(item.source)})[/dim]"
+                )
+        if diagnosis.impact:
+            console.print("      [dim]Impact[/dim]")
+            for affected in diagnosis.impact:
+                console.print(
+                    f"      [dim]· {redact_text(affected.scope)}: "
+                    f"{redact_text(affected.status)}[/dim]"
+                )
+        if diagnosis.remediation:
+            console.print("      [dim]Remediation[/dim]")
+            for step in diagnosis.remediation:
+                # Display-only: reporters never execute remediation
+                # commands, and the safety label always stays attached.
+                console.print(
+                    f"      → {redact_text(step.action)} ({step.safety.value})"
+                )
+                if step.why:
+                    console.print(f"        [dim]{redact_text(step.why)}[/dim]")
+                if step.command:
+                    console.print(f"        $ {redact_text(step.command)}")
+        if diagnosis.verification:
+            console.print("      [dim]Verification[/dim]")
+            for line in diagnosis.verification:
+                console.print(f"      [dim]· {redact_text(line)}[/dim]")
+        if diagnosis.related_issues:
+            related = ", ".join(diagnosis.related_issues)
+            console.print(f"      [dim]Related issues:[/dim] {redact_text(related)}")
+        for link in diagnosis.relationships:
+            # Rendered verbatim, direction preserved — never reinterpreted.
+            console.print(
+                f"      [dim]{redact_text(link.kind)} -> "
+                f"{redact_text(link.target_code)}[/dim]"
+            )
+        if diagnosis.exclusions:
+            console.print("      [dim]Exclusions[/dim]")
+            for line in diagnosis.exclusions:
+                console.print(f"      [dim]· {redact_text(line)}[/dim]")
+        console.print()
+
     def _issues(
         self, console: Console, result: DiagnosisResult, marks: dict[str, str]
     ) -> None:
         self._section(console, "Potential Issues")
+        # Presentation-only suppression (§25.1/§25.2): codes owned by a
+        # rendered diagnosis drop out of the duplicate top-level issue
+        # display. The Issues themselves — and the Summary and exit
+        # semantics derived from them — are never mutated.
+        suppressed = suppressed_issue_codes(result.diagnoses)
+        candidates = [
+            issue for issue in result.issues if issue.code not in suppressed
+        ]
         shown = [
             issue
-            for issue in result.issues
+            for issue in candidates
             if self._verbose or issue.severity is not Severity.INFO
         ]
-        hidden = len(result.issues) - len(shown)
+        hidden = len(candidates) - len(shown)
         if not shown:
             if hidden:
                 self._kv(console, "None", "no warnings or errors found", marks["ok"])
@@ -316,7 +420,14 @@ class TerminalReporter(Reporter):
         result: DiagnosisResult,
         marks: dict[str, str],
     ) -> None:
-        errors = {**snapshot.collection_errors, **result.check_errors}
+        # Diagnosis pipeline failures join the same verbose-only internal
+        # section under their stable component keys ("facts", "D001"..
+        # "resolver") — never relabeled as diagnoses or check results.
+        errors = {
+            **snapshot.collection_errors,
+            **result.check_errors,
+            **result.diagnosis_errors,
+        }
         if not errors or not self._verbose:
             return
         self._section(console, "Internal Diagnostics")

@@ -275,6 +275,10 @@ class TestToolkitLibraryRootsHelper:
         assert toolkit_library_roots(None) == ()
 
     def test_combines_observation_roots_and_installations_deduped(self):
+        # Roots come back host-normalized (os.path.normpath) so alias forms
+        # dedup; on a Windows host a simulated Linux-target root therefore
+        # returns in host form. The dedup of the trailing-slash alias is the
+        # behavior under test and holds on every host.
         cuda = CUDAInfo(
             selector_observations=[
                 CUDASelectorObservation(name="cuda_home", canonical_root="/opt/cuda"),
@@ -284,8 +288,8 @@ class TestToolkitLibraryRootsHelper:
             installations=[CUDAInstallation(path="/usr/local/cuda-12.4", version="12.4")],
         )
         assert toolkit_library_roots(cuda) == (
-            "/opt/cuda",
-            "/usr/local/cuda-12.4",
+            os.path.normpath("/opt/cuda"),
+            os.path.normpath("/usr/local/cuda-12.4"),
         )
 
     def test_empty_cuda_yields_no_roots(self):

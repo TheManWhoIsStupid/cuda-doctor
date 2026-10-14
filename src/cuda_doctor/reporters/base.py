@@ -23,6 +23,18 @@ class ReportInputs:
     generated_at: str
 
 
+def finalized_diagnoses(diagnoses: Sequence[Diagnosis]) -> list[Diagnosis]:
+    """The diagnoses eligible for report output (frozen model contract).
+
+    ``role=None`` is internal pre-resolver state — not a fifth role — and
+    never reaches report output. A malformed role-less entry reaching a
+    reporter is skipped in every format (the accepted terminal/Markdown
+    behavior and the JSON schema-v2 boundary alike): reporters never
+    invent a role for it, and the stored ``Diagnosis`` is never modified.
+    """
+    return [diagnosis for diagnosis in diagnoses if diagnosis.role is not None]
+
+
 def suppressed_issue_codes(diagnoses: Sequence[Diagnosis]) -> set[str]:
     """The effective human-presentation suppression set (architecture §25.2).
 
@@ -37,8 +49,7 @@ def suppressed_issue_codes(diagnoses: Sequence[Diagnosis]) -> set[str]:
     """
     return {
         code
-        for diagnosis in diagnoses
-        if diagnosis.role is not None
+        for diagnosis in finalized_diagnoses(diagnoses)
         for code in diagnosis.presentation_suppressed_issue_codes
     }
 

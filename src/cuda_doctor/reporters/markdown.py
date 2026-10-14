@@ -12,6 +12,7 @@ from cuda_doctor.diagnosis.models import Diagnosis
 from cuda_doctor.reporters.base import (
     Reporter,
     ReportInputs,
+    finalized_diagnoses,
     format_memory,
     suppressed_issue_codes,
 )
@@ -63,9 +64,7 @@ class MarkdownReporter(Reporter):
         report output: it is skipped, never given an invented role. The
         section is omitted entirely on healthy runs with no diagnoses.
         """
-        rendered = [
-            diagnosis for diagnosis in result.diagnoses if diagnosis.role is not None
-        ]
+        rendered = finalized_diagnoses(result.diagnoses)
         if not rendered:
             return
         add("## Diagnoses")
@@ -76,7 +75,7 @@ class MarkdownReporter(Reporter):
     def _diagnosis(self, diagnosis: Diagnosis, add: Callable[[str], None]) -> None:
         # Every free-form string is redacted: Markdown is shareable output.
         role = diagnosis.role.value.upper() if diagnosis.role is not None else ""
-        header = f"`{diagnosis.code}` — {diagnosis.title}"
+        header = f"`{diagnosis.code}` — {redact_text(diagnosis.title)}"
         add(f"### {role} · {header}" if role else f"### {header}")
         add("")
         meta = [

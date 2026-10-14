@@ -655,10 +655,24 @@ class TestJsonSchemaV2:
             for hint in ("explains_active_failure", "risk_only", "causal_parent_codes"):
                 assert hint not in dx
 
-    def test_roleless_diagnosis_serializes_role_null_without_inventing(self):
+    def test_roleless_diagnosis_never_reaches_json_output(self):
+        # Frozen finalized-report boundary: role=None is internal
+        # pre-resolver state, not a fifth role. JSON skips the entry
+        # exactly like the human reporters — never serialized as
+        # "role": null, never given an invented role.
         diagnosis = carrier_diagnosis(role=None, suppressed=("TORCH002",))
         payload = JsonReporter.build(synthetic_inputs(synthetic_result([diagnosis])))
-        assert payload["diagnoses"][0]["role"] is None
+        assert payload["diagnoses"] == []
+        assert diagnosis.role is None  # the stored Diagnosis is untouched
+
+    def test_roleless_diagnosis_skipped_finalized_peers_unchanged(self):
+        roleless = carrier_diagnosis("D00L", role=None)
+        finalized = carrier_diagnosis("D00F", DiagnosisRole.PRIMARY)
+        payload = JsonReporter.build(
+            synthetic_inputs(synthetic_result([roleless, finalized]))
+        )
+        assert [dx["code"] for dx in payload["diagnoses"]] == ["D00F"]
+        assert payload["diagnoses"][0] == finalized.to_dict(redact=True)
 
 
 class TestTerminalDiagnoses:
@@ -808,6 +822,24 @@ class TestTerminalDiagnoses:
         assert "diagnosis component failed" in verbose
         assert "ExplodingCheck" in verbose  # check layer stays distinct but co-shown
 
+    def test_private_diagnosis_title_redacted(self, fake_home):
+        # Maintainer-review blocker regression: the TITLE itself carries
+        # the private path — the presentation boundary must redact it
+        # like every other free-form diagnosis string.
+        secret = "/home/secretuser/private/project"
+        diagnosis = Diagnosis(
+            code="D00X",
+            title=f"Conflict under {secret}",
+            severity=Severity.WARNING,
+            confidence=Confidence.HIGH,
+            summary="Synthetic.",
+            role=DiagnosisRole.PRIMARY,
+        )
+        text = TerminalReporter().render(synthetic_inputs(synthetic_result([diagnosis])))
+        assert "secretuser" not in text
+        assert "D00X" in text  # redaction never hides the diagnosis itself
+        assert "~" in text or "<user>" in text
+
     def test_private_diagnosis_text_redacted(self, fake_home):
         secret = "/home/secretuser/private/project"
         diagnosis = Diagnosis(
@@ -921,6 +953,15 @@ class TestMarkdownDiagnoses:
         assert "D00X" not in text
         assert "## Diagnoses" not in text
 
+    def test_suppression_requires_a_rendered_carrier(self):
+        # A skipped role-less diagnosis is not rendered, so its carrier
+        # never activates human issue suppression (§25.2) — the twin of
+        # the terminal regression.
+        diagnosis = carrier_diagnosis(role=None, suppressed=("TORCH002",))
+        result = synthetic_result([diagnosis], [make_issue("TORCH002")])
+        text = MarkdownReporter().render(synthetic_inputs(result))
+        assert "### 🔴 ERROR · `TORCH002`" in text
+
     def test_torch002_suppressed_from_issue_list_only(self):
         inputs = inputs_for(critical_snapshot())
         text = MarkdownReporter().render(inputs)
@@ -935,6 +976,24 @@ class TestMarkdownDiagnoses:
         assert text.count("TORCH004") == 1
         assert "### 🔵 INFO · `TORCH004`" not in text
         assert [i.code for i in inputs.result.issues] == ["TORCH004"]
+
+    def test_private_diagnosis_title_redacted(self, fake_home):
+        # Maintainer-review blocker regression: the TITLE itself carries
+        # the private path — the shareable-output boundary must redact it
+        # like every other free-form diagnosis string.
+        secret = "/home/secretuser/private/project"
+        diagnosis = Diagnosis(
+            code="D00X",
+            title=f"Conflict under {secret}",
+            severity=Severity.WARNING,
+            confidence=Confidence.HIGH,
+            summary="Synthetic.",
+            role=DiagnosisRole.PRIMARY,
+        )
+        text = MarkdownReporter().render(synthetic_inputs(synthetic_result([diagnosis])))
+        assert "secretuser" not in text
+        assert "`D00X`" in text  # redaction never hides the diagnosis itself
+        assert "~" in text or "<user>" in text
 
     def test_private_diagnosis_text_redacted(self, fake_home):
         secret = "/home/secretuser/private/project"

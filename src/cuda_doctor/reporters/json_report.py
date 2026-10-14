@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from cuda_doctor.core.models import snapshot_to_dict
-from cuda_doctor.reporters.base import Reporter, ReportInputs
+from cuda_doctor.reporters.base import Reporter, ReportInputs, finalized_diagnoses
 from cuda_doctor.utils.redact import redact_value
 from cuda_doctor.version import __version__
 
@@ -31,9 +31,14 @@ class JsonReporter(Reporter):
             "issues": [issue.to_dict(redact=True) for issue in result.issues],
             # Schema v2 (additive): every finalized diagnosis through the
             # accepted Diagnosis serializer — machine-complete, never
-            # filtered by presentation suppression.
+            # filtered by presentation suppression. A malformed role-less
+            # entry is internal pre-resolver state, not a fifth role: it
+            # is skipped at this boundary exactly like the human
+            # reporters, never serialized as "role": null and never given
+            # an invented role.
             "diagnoses": [
-                diagnosis.to_dict(redact=True) for diagnosis in result.diagnoses
+                diagnosis.to_dict(redact=True)
+                for diagnosis in finalized_diagnoses(result.diagnoses)
             ],
             "summary": result.summary.to_dict(),
             # Exception texts can embed absolute paths — redact like the rest.

@@ -13,6 +13,7 @@ from cuda_doctor.diagnosis.models import Diagnosis
 from cuda_doctor.reporters.base import (
     Reporter,
     ReportInputs,
+    finalized_diagnoses,
     format_memory,
     suppressed_issue_codes,
 )
@@ -294,11 +295,7 @@ class TerminalReporter(Reporter):
         defense-in-depth on top of the bounded, presentation-safe text
         the accepted rules already emit.
         """
-        rendered = [
-            diagnosis
-            for diagnosis in result.diagnoses
-            if diagnosis.role is not None
-        ]
+        rendered = finalized_diagnoses(result.diagnoses)
         if not rendered:
             # No noise on healthy runs: the section itself is omitted.
             return
@@ -310,7 +307,9 @@ class TerminalReporter(Reporter):
         self, console: Console, diagnosis: Diagnosis, marks: dict[str, str]
     ) -> None:
         mark = marks[_SEVERITY_MARK[diagnosis.severity]]
-        console.print(f"  {mark} [bold]{diagnosis.code}[/bold]  {diagnosis.title}")
+        console.print(
+            f"  {mark} [bold]{diagnosis.code}[/bold]  {redact_text(diagnosis.title)}"
+        )
         if diagnosis.role is not None:
             console.print(
                 f"      [dim]{diagnosis.role.value.upper()}"

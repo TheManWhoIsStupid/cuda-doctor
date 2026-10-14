@@ -509,10 +509,14 @@ class TestDiagnosisResultIntegration:
         assert result.summary.status is EnvironmentStatus.HEALTHY
 
     def test_engine_run_degraded_legacy_fields_intact(self):
+        # Since Phase 11 the degraded snapshot also produces its resolved
+        # diagnosis (D003 over the unavailable CUDA probe); the legacy
+        # issue-derived fields must stay exactly as they were.
         snapshot = base_snapshot()
         snapshot.pytorch = replace(snapshot.pytorch, cuda_available=False, devices=[])
         result = DiagnosisEngine().run(snapshot)
-        assert result.diagnoses == []
+        assert [d.code for d in result.diagnoses] == ["D003"]
+        assert all(d.role is not None for d in result.diagnoses)
         assert result.diagnosis_errors == {}
         assert any(issue.code == "TORCH002" for issue in result.issues)
         assert result.summary.status is EnvironmentStatus.DEGRADED

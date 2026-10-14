@@ -57,6 +57,7 @@ from cuda_doctor.diagnosis.issue import Issue
 from cuda_doctor.diagnosis.models import (
     Confidence,
     Diagnosis,
+    DiagnosisRole,
     EvidenceItem,
     ImpactItem,
     RemediationSafety,
@@ -2598,10 +2599,12 @@ class TestBuilderEndToEnd:
         assert RULE.evaluate(facts, []) is not None
 
 
-class TestNoEngineIntegration:
-    def test_engine_still_emits_no_diagnoses(self):
-        # Plan §28/§38: the rule fires on the built facts, but the engine
-        # neither runs it nor populates DiagnosisResult.diagnoses.
+class TestEngineIntegration:
+    def test_engine_emits_the_resolved_diagnosis(self):
+        # Phase 11 wired the accepted rules into the engine: the rule fires
+        # on the built facts (exact-load-name semantics intact through the
+        # real fact build) and its candidate reaches
+        # DiagnosisResult.diagnoses finalized by the resolver.
         snapshot = snapshot_with_inventory(
             raw(
                 "libcudart",
@@ -2619,7 +2622,10 @@ class TestNoEngineIntegration:
             ),
         )
         result = DiagnosisEngine().run(snapshot)
-        assert result.diagnoses == []
+        assert [(d.code, d.role) for d in result.diagnoses] == [
+            ("D004", DiagnosisRole.PRIMARY)
+        ]
+        assert result.diagnoses[0].confidence is Confidence.MEDIUM
         assert result.diagnosis_errors == {}
         assert RULE.evaluate(built_facts(snapshot), []) is not None
 

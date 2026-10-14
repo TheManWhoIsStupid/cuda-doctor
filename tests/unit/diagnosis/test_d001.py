@@ -37,6 +37,7 @@ from cuda_doctor.diagnosis.models import (
     Confidence,
     Diagnosis,
     DiagnosisCandidate,
+    DiagnosisRole,
     EvidenceItem,
     ImpactItem,
     RemediationSafety,
@@ -1153,10 +1154,11 @@ class TestPurityAndDeterminism:
                 assert forbidden not in source, forbidden
 
 
-class TestNoEngineIntegration:
-    def test_engine_still_emits_no_diagnoses(self):
-        # Phase-6 plan §14: the rule fires on the facts, but the engine
-        # neither runs it nor populates DiagnosisResult.diagnoses.
+class TestEngineIntegration:
+    def test_engine_emits_the_resolved_diagnosis(self):
+        # Phase 11 wired the accepted rules into the engine: the rule fires
+        # on the built facts and its candidate reaches
+        # DiagnosisResult.diagnoses finalized by the resolver.
         snapshot = snapshot_with_selectors(
             observation(
                 "cuda_home",
@@ -1174,6 +1176,9 @@ class TestNoEngineIntegration:
             ),
         )
         result = DiagnosisEngine().run(snapshot)
-        assert result.diagnoses == []
+        assert [(d.code, d.role) for d in result.diagnoses] == [
+            ("D001", DiagnosisRole.PRIMARY)
+        ]
+        assert result.diagnoses[0].confidence is Confidence.HIGH
         assert result.diagnosis_errors == {}
         assert RULE.evaluate(built_facts(snapshot), []) is not None

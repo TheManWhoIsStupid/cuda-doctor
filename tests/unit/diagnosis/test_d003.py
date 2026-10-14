@@ -48,6 +48,7 @@ from cuda_doctor.diagnosis.models import (
     Confidence,
     Diagnosis,
     DiagnosisCandidate,
+    DiagnosisRole,
     RemediationSafety,
 )
 from cuda_doctor.diagnosis.rules import (
@@ -1219,14 +1220,20 @@ class TestBuilderEndToEnd:
 # -- no engine integration (plan §32) ---------------------------------------------
 
 
-class TestNoEngineIntegration:
-    def test_engine_still_emits_no_diagnoses(self):
-        # The rule fires on the built facts, but the engine neither runs
-        # it nor populates DiagnosisResult.diagnoses (Phase 11 owns
-        # wiring).
+class TestEngineIntegration:
+    def test_engine_emits_the_resolved_diagnosis(self):
+        # Phase 11 wired the accepted rules into the engine: the rule fires
+        # on the built facts and its candidate reaches
+        # DiagnosisResult.diagnoses finalized by the resolver. No D004
+        # prior exists here, so D003 lands on the frozen UNKNOWN cause.
         snapshot = base_snapshot()
         snapshot.pytorch = replace(snapshot.pytorch, cuda_available=False)
         result = DiagnosisEngine().run(snapshot)
-        assert result.diagnoses == []
+        assert [(d.code, d.role) for d in result.diagnoses] == [
+            ("D003", DiagnosisRole.PRIMARY)
+        ]
+        assert result.diagnoses[0].confidence is Confidence.LOW
         assert result.diagnosis_errors == {}
+        # The observed failure stays reported at the issue layer.
+        assert [issue.code for issue in result.issues] == ["TORCH002"]
         assert evaluate(built_facts(snapshot)) is not None

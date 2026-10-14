@@ -935,6 +935,52 @@ class TestDuplicateCodes:
         ]
         assert resolve(a, b) == forward  # stable across repeated resolution
 
+    def test_different_hints_same_payload_is_permutation_invariant(self):
+        # Maintainer follow-up regression: identical diagnosis payloads
+        # (and code/title/confidence/severity/explains) but DIFFERENT
+        # causal_parent_codes. The envelope hints feed §12.1 and the
+        # loser-role matrix, so a diagnosis-only fingerprint still ties
+        # and input order would decide the winner — flipping a third
+        # candidate's role (CONTRIBUTING vs POSSIBLE). The candidate-
+        # level fingerprint must decide deterministically.
+        d003_payload = {
+            "severity": Severity.ERROR,
+            "summary": "same D003 summary",
+            "title": "same D003 title",
+        }
+        named = candidate(
+            "D003",
+            confidence=Confidence.MEDIUM,
+            explains=True,
+            risk_only=False,
+            parents=("D004",),
+            **d003_payload,
+        )
+        unnamed = candidate(
+            "D003",
+            confidence=Confidence.MEDIUM,
+            explains=True,
+            risk_only=False,
+            parents=(),
+            **d003_payload,
+        )
+        ineligible_d004 = candidate("D004", confidence=Confidence.LOW)
+        assert ineligible_d004.explains_active_failure is False
+        # LOW confidence without an active-failure explanation keeps D004
+        # out of the PRIMARY competition even though A names it (§12.1).
+        forward = resolve(named, unnamed, ineligible_d004)
+        reverse = resolve(unnamed, named, ineligible_d004)
+        assert forward == reverse
+        # Deterministic outcome: the parent-naming twin wins the
+        # fingerprint tie (('D004',) sorts before ()), so its named D004
+        # takes the matrix's CONTRIBUTING slot — in both input orders.
+        assert order(forward) == [
+            ("D003", DiagnosisRole.PRIMARY),
+            ("D003", DiagnosisRole.SECONDARY),
+            ("D004", DiagnosisRole.CONTRIBUTING),
+        ]
+        assert order(reverse)[2] == ("D004", DiagnosisRole.CONTRIBUTING)
+
 
 # -- cycles (plan §26) -----------------------------------------------------------------------------
 

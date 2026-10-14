@@ -151,15 +151,15 @@ def _ranking_key(
     the rank maps order the frozen enumerations. Everything through
     §12.6 is the frozen production ranking and is preserved exactly.
 
-    The trailing code, title, and payload fingerprint are the
+    The trailing code, title, and candidate fingerprint are the
     duplicate-code fallback only: two same-code candidates that tie on
-    every frozen dimension are separated by title, then by a full
-    non-ranking payload fingerprint, so the key is a genuine total
-    order and no outcome ever depends on input order (plan §24/§25:
+    every frozen dimension are separated by title, then by a
+    whole-candidate fingerprint, so the key is a genuine total order
+    and no outcome ever depends on input order (plan §24/§25:
     duplicates are retained and deterministically degraded, never
     decided silently by position). These trailing fields sit strictly
     after the frozen dimensions and never decide anything for real
-    v0.2.0 inputs, which have unique codes; the fingerprint is payload
+    v0.2.0 inputs, which have unique codes; the fingerprint is state
     serialization, not a ranking criterion, so no free-form text
     influences the frozen ranking itself (plan §18.4/§18.10).
     """
@@ -173,21 +173,30 @@ def _ranking_key(
         _CODE_RANK.get(diagnosis.code, _UNKNOWN_CODE_RANK),  # §12.6
         diagnosis.code,
         diagnosis.title,
-        _payload_fingerprint(diagnosis),
+        _candidate_fingerprint(candidate),
     )
 
 
-def _payload_fingerprint(diagnosis: Diagnosis) -> str:
-    """A deterministic rendering of the entire non-ranking payload.
+def _candidate_fingerprint(candidate: DiagnosisCandidate) -> str:
+    """A deterministic rendering of the complete candidate state.
 
     Only reachable as the final duplicate-code tie-break, after code
-    and title have also tied: the serialized payload distinguishes any
-    two candidates that are not fully equal, making the ranking key a
-    total order. ``role`` is neutralized first so a malformed pre-set
-    role cannot influence ordering; distinct payloads yield distinct
-    renderings because the dataclass field order is fixed.
+    and title have also tied. The fingerprint must cover the whole
+    ``DiagnosisCandidate`` envelope — the carried hints
+    (``explains_active_failure``, ``risk_only``,
+    ``causal_parent_codes``) as well as the diagnosis — because the
+    hints feed §12.1 and the loser-role matrix: two candidates with
+    identical diagnoses but different parent hints would otherwise
+    still tie, letting input order pick the winner and change another
+    candidate's final role. The resolver-owned ``diagnosis.role`` is
+    neutralized first so a malformed pre-set role cannot influence
+    ordering; candidates differing in any other field serialize
+    differently because the dataclass field order is fixed.
     """
-    return repr(asdict(replace(diagnosis, role=None)))
+    normalized = replace(
+        candidate, diagnosis=replace(candidate.diagnosis, role=None)
+    )
+    return repr(asdict(normalized))
 
 
 def _primary_eligible(candidate: DiagnosisCandidate) -> bool:

@@ -32,10 +32,12 @@ environment fails, not only what it observed.
   is insufficient the cause is reported conservatively as unknown, never
   guessed.
 - `D004` — CUDA Runtime Library Conflict (Linux only): bounded static
-  evidence that CUDA runtime-library resolution is conflicted, such as an
-  `LD_LIBRARY_PATH` entry shadowing the copy a toolkit or Python package
-  would otherwise load, judged by exact library load names. Reported as a
-  risk with conservative wording — not as proof of which shared object
+  evidence of a runtime-library conflict risk — an exact versioned CUDA
+  library name observed in `LD_LIBRARY_PATH` resolves to a file from an
+  incompatible CUDA family, judged strictly by exact library load names;
+  same-name observations elsewhere (e.g. in the current Python
+  environment) only corroborate the risk. No loader precedence across
+  origins is inferred, and nothing is claimed about which shared object
   was actually loaded.
 - Deterministic diagnosis roles: each run selects at most one `PRIMARY`
   root cause, with remaining diagnoses ranked as `CONTRIBUTING`,

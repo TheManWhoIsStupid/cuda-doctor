@@ -16,7 +16,7 @@ nvcc on PATH", "driver below the documented minimum"), each with a code,
 evidence, and recommendations. **Diagnoses** are an additive root-cause layer
 on top: when the evidence is sufficient, cuda-doctor names the underlying
 conflict — disagreeing CUDA selectors, a PyTorch build that clashes with the
-local toolchain, a shadowed runtime library — and ranks at most one of them
+local toolchain, a runtime-library conflict risk — and ranks at most one of them
 as the `PRIMARY` cause. Not every run has a diagnosis; a healthy machine
 simply reports none.
 
@@ -117,7 +117,7 @@ supports one:
 | `D001` | CUDA Toolkit Resolution Conflict | The *active* CUDA development selectors disagree — e.g. `CUDA_HOME` resolves to one toolkit while `nvcc` on `PATH` reports another. Several installed toolkits alone are **not** a conflict. |
 | `D002` | PyTorch / Local Toolkit Build Mismatch | The PyTorch build's CUDA version conflicts materially with the active local development toolchain. Relevant when building extensions against a local toolkit — not for wheel-only runtime use, where the local toolkit does not have to match PyTorch. |
 | `D003` | PyTorch CUDA Unavailable | Explains an observed `torch.cuda.is_available() == False` when enough evidence exists: CPU-only wheel, no visible GPU, unusable or incompatible driver, a runtime-library conflict, or an explicit `CUDA_VISIBLE_DEVICES` mask. With insufficient evidence the cause is reported conservatively as unknown — never guessed. |
-| `D004` | CUDA Runtime Library Conflict *(Linux only)* | Bounded static evidence that CUDA runtime-library resolution is conflicted — e.g. an `LD_LIBRARY_PATH` entry shadowing the copy a toolkit or Python package would otherwise load, judged by exact library load names. A risk indicator, **not** proof of which shared object was actually loaded. |
+| `D004` | CUDA Runtime Library Conflict *(Linux only)* | Bounded static evidence of a runtime-library conflict risk: an exact versioned CUDA library name observed in `LD_LIBRARY_PATH` resolves to a file from an incompatible CUDA family, judged strictly by exact library load names. Same-name observations elsewhere (e.g. in the current Python environment) only corroborate the risk. No loader precedence across origins is inferred, and nothing is claimed about which shared object was actually loaded. |
 
 A resolver then ranks the emitted diagnoses deterministically: at most one is
 `PRIMARY`; the others are `CONTRIBUTING`, `POSSIBLE`, or `SECONDARY`, with
@@ -203,7 +203,7 @@ CLI (Typer) ─ CollectionRunner ─▶ Collectors (facts only)
                                      ▼
               DiagnosisFacts (normalized, tri-state view)
                                      ▼
-              D001 → D002 → D004 → D003 (diagnosis rules, pure)
+              D001 → D002 → D004 → D003 (deterministic rules)
                                      ▼
                 DiagnosisResolver (assigns global roles)
                                      ▼
@@ -219,8 +219,11 @@ Key invariants (see `AGENTS.md`):
   the snapshot (+ compatibility data), which makes them unit-testable without
   hardware.
 - **Facts normalize; rules reason.** The fact builder turns the snapshot into
-  a normalized tri-state view; each diagnosis rule (D001–D004) is a pure
-  function of those facts — the checks are *not* the root-cause rules.
+  a normalized tri-state view; D001, D002, and D004 are pure functions of
+  those facts, while D003 additionally receives explicit prior-candidate
+  context from the rules already run (notably whether D004 was emitted). No
+  rule recollects the host, and D003 never invokes D004 itself; the checks
+  are *not* the root-cause rules.
 - **Only the resolver assigns roles.** Rules emit candidates; the resolver
   deterministically selects at most one `PRIMARY` and ranks the rest.
 - **Reporters only present.** They serialize and render; nothing downstream

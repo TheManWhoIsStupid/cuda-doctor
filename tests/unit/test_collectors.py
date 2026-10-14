@@ -228,6 +228,21 @@ def _version_probes(runner: FakeRunner) -> list[tuple[str, ...]]:
     return [call for call in runner.calls if call[1:] == ("--version",)]
 
 
+def _rel_entry(base: Path, entry: Path) -> str:
+    """Host-separator relative form of a real directory under ``base``.
+
+    A Linux-target PATH is ':'-joined by production (frozen target
+    semantics), so a test entry must not itself contain ':'. Absolute host
+    paths violate that on Windows: the drive-letter colon is reinterpreted
+    by the target split and resolution silently misses the directory (the
+    defect behind the red Windows CI matrix for 5b37593). Relative entries
+    under the chdir'd base are separator-free on every host, so the target
+    split recovers exactly the intended entry and the real filesystem
+    checks behind it (is_file / os.access) stay genuine.
+    """
+    return os.path.join(*entry.resolve().relative_to(base.resolve()).parts)
+
+
 def _can_symlink() -> bool:
     if not hasattr(os, "symlink"):
         return False
@@ -245,32 +260,37 @@ requires_symlinks = pytest.mark.skipif(not _can_symlink(), reason="symlinks unav
 
 
 class TestNVCCSelectorObservation:
-    def test_agrees_with_legacy_fields(self, tmp_path, fixtures_dir):
+    def test_agrees_with_legacy_fields(self, tmp_path, fixtures_dir, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         toolkit = _make_toolkit(tmp_path)
         nvcc_bin = toolkit / "bin" / "nvcc"
+        bin_entry = _rel_entry(tmp_path, toolkit / "bin")
+        nvcc_entry = os.path.join(bin_entry, "nvcc")
         runner = FakeRunner(
-            {(str(nvcc_bin), "--version"): ok(load_fixture(fixtures_dir, "nvcc/nvcc_12_4.txt"))}
+            {(nvcc_entry, "--version"): ok(load_fixture(fixtures_dir, "nvcc/nvcc_12_4.txt"))}
         )
         info = CUDACollector(
             runner,
-            env={"PATH": str(toolkit / "bin")},
+            env={"PATH": bin_entry},
             platform=Platform.LINUX,
             usr_local_cuda_path=str(tmp_path / "absent"),
         ).collect()
         obs = _by_name(info)["nvcc"]
         assert obs.raw_value == "nvcc"
-        assert obs.resolved_path == info.nvcc_path == str(nvcc_bin)
+        assert obs.resolved_path == info.nvcc_path == nvcc_entry
         assert obs.canonical_path == str(nvcc_bin.resolve())
         assert obs.canonical_root == str(toolkit.resolve())
         assert obs.toolkit_version == info.toolkit_version == "12.4"
         assert obs.version_source == VERSION_SOURCE_DIRECT
         assert obs.exists is True and obs.valid is True
 
-    def test_probe_failure_yields_unknown_version(self, tmp_path):
+    def test_probe_failure_yields_unknown_version(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         toolkit = _make_toolkit(tmp_path)
+        bin_entry = _rel_entry(tmp_path, toolkit / "bin")
         info = CUDACollector(
             FakeRunner(),  # every probe fails
-            env={"PATH": str(toolkit / "bin")},
+            env={"PATH": bin_entry},
             platform=Platform.LINUX,
             usr_local_cuda_path=str(tmp_path / "absent"),
         ).collect()
@@ -279,13 +299,14 @@ class TestNVCCSelectorObservation:
         assert obs.toolkit_version is None and info.toolkit_version is None
         assert obs.version_source == VERSION_SOURCE_UNKNOWN
 
-    def test_resolution_uses_injected_path_not_host(self, tmp_path):
+    def test_resolution_uses_injected_path_not_host(self, tmp_path, monkeypatch):
         # §10.3: PATH resolution depends only on the injected environment —
         # a host machine with nvcc installed anywhere must not leak in.
+        monkeypatch.chdir(tmp_path)
         toolkit = _make_toolkit(tmp_path)
         found = CUDACollector(
             FakeRunner(),
-            env={"PATH": str(toolkit / "bin")},
+            env={"PATH": _rel_entry(tmp_path, toolkit / "bin")},
             platform=Platform.LINUX,
             usr_local_cuda_path=str(tmp_path / "absent"),
         ).collect()
@@ -303,17 +324,20 @@ class TestNVCCSelectorObservation:
 
 
 class TestPathCudaBinObservation:
-    def test_records_winning_entry_only(self, tmp_path, fixtures_dir):
+    def test_records_winning_entry_only(self, tmp_path, fixtures_dir, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         winning = _make_toolkit(tmp_path, "cuda-12.4")
         shadowed = _make_toolkit(tmp_path, "cuda-11.8")
-        winning_nvcc = winning / "bin" / "nvcc"
+        winning_entry = _rel_entry(tmp_path, winning / "bin")
+        shadowed_entry = _rel_entry(tmp_path, shadowed / "bin")
+        winning_nvcc = os.path.join(winning_entry, "nvcc")
         runner = FakeRunner(
-            {(str(winning_nvcc), "--version"): ok(load_fixture(fixtures_dir, "nvcc/nvcc_12_4.txt"))}
+            {(winning_nvcc, "--version"): ok(load_fixture(fixtures_dir, "nvcc/nvcc_12_4.txt"))}
         )
         info = CUDACollector(
             runner,
             env={
-                "PATH": f"{winning / 'bin'}:{shadowed / 'bin'}",
+                "PATH": f"{winning_entry}:{shadowed_entry}",
             },
             platform=Platform.LINUX,
             usr_local_cuda_path=str(tmp_path / "absent"),
@@ -322,12 +346,12 @@ class TestPathCudaBinObservation:
         path_bins = [obs for obs in observations if obs.name == "path_cuda_bin"]
         assert len(path_bins) == 1  # exactly one, never one per CUDA-looking entry
         obs = path_bins[0]
-        assert obs.raw_value == str(winning / "bin")
-        assert obs.resolved_path == str(winning_nvcc)
+        assert obs.raw_value == winning_entry
+        assert obs.resolved_path == winning_nvcc
         assert obs.canonical_root == str(winning.resolve())
         # The non-winning CUDA-looking entry is incidental (§16.10) and
         # appears in no observation.
-        assert all(str(shadowed / "bin") != obs.raw_value for obs in observations)
+        assert all(shadowed_entry != obs.raw_value for obs in observations)
         # Version facts are inherited from the resolved nvcc.
         assert obs.toolkit_version == "12.4"
         assert obs.version_source == VERSION_SOURCE_DIRECT
@@ -389,20 +413,25 @@ class TestCUDACXXObservation:
         assert obs.toolkit_version is None
         assert obs.version_source == VERSION_SOURCE_UNKNOWN
 
-    def test_bare_name_resolved_on_injected_path(self, tmp_path, fixtures_dir):
+    def test_bare_name_resolved_on_injected_path(self, tmp_path, fixtures_dir, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         toolkit = _make_toolkit(tmp_path)
-        nvcc_bin = toolkit / "bin" / "nvcc"
+        bin_entry = _rel_entry(tmp_path, toolkit / "bin")
         runner = FakeRunner(
-            {(str(nvcc_bin), "--version"): ok(load_fixture(fixtures_dir, "nvcc/nvcc_12_4.txt"))}
+            {
+                (os.path.join(bin_entry, "nvcc"), "--version"): ok(
+                    load_fixture(fixtures_dir, "nvcc/nvcc_12_4.txt")
+                )
+            }
         )
         info = CUDACollector(
             runner,
-            env={"PATH": f"/nonexistent:{toolkit / 'bin'}", "CUDACXX": "nvcc"},
+            env={"PATH": f"/nonexistent:{bin_entry}", "CUDACXX": "nvcc"},
             platform=Platform.LINUX,
             usr_local_cuda_path=str(tmp_path / "absent"),
         ).collect()
         obs = _by_name(info)["cudacxx"]
-        assert obs.resolved_path == str(nvcc_bin)
+        assert obs.resolved_path == os.path.join(bin_entry, "nvcc")
         assert obs.canonical_root == str(toolkit.resolve())
         assert obs.toolkit_version == "12.4"
 
@@ -437,9 +466,10 @@ class TestCUDACXXObservation:
         ).collect()
         assert "cudacxx" not in _by_name(info)
 
-    def test_windows_exe_fallback_not_applied_on_linux(self, tmp_path):
+    def test_windows_exe_fallback_not_applied_on_linux(self, tmp_path, monkeypatch):
         # Fix 1 is Windows-only: on a Linux target a bare "nvcc" must not
         # silently resolve to an nvcc.exe sitting in the injected PATH entry.
+        monkeypatch.chdir(tmp_path)
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
         exe = bin_dir / "nvcc.exe"
@@ -447,7 +477,7 @@ class TestCUDACXXObservation:
         exe.chmod(0o755)
         info = CUDACollector(
             FakeRunner(),
-            env={"PATH": str(bin_dir), "CUDACXX": "nvcc"},
+            env={"PATH": _rel_entry(tmp_path, bin_dir), "CUDACXX": "nvcc"},
             platform=Platform.LINUX,
             usr_local_cuda_path=str(tmp_path / "absent"),
         ).collect()
@@ -528,12 +558,13 @@ class TestCUDAHomeObservation:
             usr_local_cuda_path=str(tmp_path / "absent"),
         ).collect()
 
-    def test_direct_version_from_home_nvcc_probed_once(self, tmp_path, fixtures_dir):
+    def test_direct_version_from_home_nvcc_probed_once(self, tmp_path, fixtures_dir, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         toolkit = _make_toolkit(tmp_path)
-        nvcc_bin = toolkit / "bin" / "nvcc"
+        bin_entry = _rel_entry(tmp_path, toolkit / "bin")
         runner = FakeRunner(
             {
-                (str(nvcc_bin), "--version"): ok(
+                (os.path.join(bin_entry, "nvcc"), "--version"): ok(
                     load_fixture(fixtures_dir, "nvcc/nvcc_12_4.txt")
                 )
             }
@@ -542,7 +573,7 @@ class TestCUDAHomeObservation:
         # it must be probed exactly once (§33 performance budget).
         info = CUDACollector(
             runner,
-            env={"PATH": str(toolkit / "bin"), "CUDA_HOME": str(toolkit)},
+            env={"PATH": bin_entry, "CUDA_HOME": str(toolkit)},
             platform=Platform.LINUX,
             usr_local_cuda_path=str(tmp_path / "absent"),
         ).collect()
@@ -585,18 +616,20 @@ class TestCUDAHomeObservation:
         assert info.cuda_home_exists is False  # legacy behavior unchanged
 
     @requires_symlinks
-    def test_alias_and_nvcc_normalize_to_same_root(self, tmp_path, fixtures_dir):
+    def test_alias_and_nvcc_normalize_to_same_root(self, tmp_path, fixtures_dir, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         real = _make_toolkit(tmp_path, "cuda-12.4")
         alias = tmp_path / "cuda"
         os.symlink(real, alias)
+        real_entry = _rel_entry(tmp_path, real / "bin")
         runner = FakeRunner(
-            {(str(real / "bin" / "nvcc"), "--version"): ok(
+            {(os.path.join(real_entry, "nvcc"), "--version"): ok(
                 load_fixture(fixtures_dir, "nvcc/nvcc_12_4.txt")
             )}
         )
         info = CUDACollector(
             runner,
-            env={"PATH": str(real / "bin"), "CUDA_HOME": str(alias)},
+            env={"PATH": real_entry, "CUDA_HOME": str(alias)},
             platform=Platform.LINUX,
             usr_local_cuda_path=str(tmp_path / "absent"),
         ).collect()
@@ -604,7 +637,7 @@ class TestCUDAHomeObservation:
         # Raw strings differ, canonical identities do not (path-string
         # inequality is not toolkit-identity inequality).
         assert by_name["cuda_home"].raw_value == str(alias)
-        assert by_name["nvcc"].resolved_path == str(real / "bin" / "nvcc")
+        assert by_name["nvcc"].resolved_path == os.path.join(real_entry, "nvcc")
         assert by_name["cuda_home"].canonical_root == by_name["nvcc"].canonical_root
         # Alias and real binary are the same file: still one probe.
         assert len(_version_probes(runner)) == 1
@@ -707,20 +740,61 @@ class TestSelectorObservationPlatformGating:
             assert "usr_local_cuda" in _by_name(info)
 
 
+class TestLinuxTargetEnvHermeticity:
+    """Regression for the red Windows CI matrix on 5b37593.
+
+    Linux-target simulations must build their ':'-joined PATH from entries
+    that survive the target split on ANY host. Embedding host-absolute
+    tmp_path values broke that on Windows — the drive-letter colon is
+    consumed by the split, so nvcc resolution silently missed the toolkit
+    and the nvcc/path_cuda_bin observations disappeared. If test
+    construction regresses that way again, the resolution test fails on the
+    Windows CI leg and the separator audit fails on any host whose absolute
+    paths contain ':' (i.e. Windows).
+    """
+
+    def test_entries_never_embed_the_target_separator(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        toolkit = _make_toolkit(tmp_path)
+        entry = _rel_entry(tmp_path, toolkit / "bin")
+        # The Linux-target split must recover exactly the intended entry;
+        # a ':' inside a host-absolute path (a Windows drive letter) breaks
+        # that identity.
+        assert f"/nonexistent:{entry}".split(":") == ["/nonexistent", entry]
+
+    def test_linux_target_resolution_succeeds_on_any_host(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        toolkit = _make_toolkit(tmp_path)
+        info = CUDACollector(
+            FakeRunner(),
+            env={"PATH": _rel_entry(tmp_path, toolkit / "bin")},
+            platform=Platform.LINUX,
+            usr_local_cuda_path=str(tmp_path / "absent"),
+        ).collect()
+        assert info.nvcc_found is True
+        assert _by_name(info)["nvcc"].canonical_root == str(toolkit.resolve())
+
+
 class TestSelectorVersionSourceVocabulary:
-    def test_emitted_sources_stay_in_frozen_vocabulary(self, tmp_path, fixtures_dir):
+    def test_emitted_sources_stay_in_frozen_vocabulary(self, tmp_path, fixtures_dir, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         toolkit = _make_toolkit(tmp_path)
         nvcc_bin = toolkit / "bin" / "nvcc"
         # A versioned root without bin/nvcc can only derive its version
         # from naming (DERIVED_WEAK); the absent /usr/local/cuda stays UNKNOWN.
         versioned_without_nvcc = _make_toolkit(tmp_path, "cuda-11.8", nvcc=False)
+        bin_entry = _rel_entry(tmp_path, toolkit / "bin")
         runner = FakeRunner(
-            {(str(nvcc_bin), "--version"): ok(load_fixture(fixtures_dir, "nvcc/nvcc_12_4.txt"))}
+            {
+                (os.path.join(bin_entry, "nvcc"), "--version"): ok(
+                    load_fixture(fixtures_dir, "nvcc/nvcc_12_4.txt")
+                )
+            }
         )
         info = CUDACollector(
             runner,
             env={
-                "PATH": str(toolkit / "bin"),
+                "PATH": bin_entry,
                 "CUDA_HOME": str(toolkit),
                 "CUDA_PATH": str(versioned_without_nvcc),
                 "CUDACXX": str(nvcc_bin),

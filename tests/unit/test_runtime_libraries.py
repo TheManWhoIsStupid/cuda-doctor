@@ -83,6 +83,21 @@ def _lib(directory: Path, name: str) -> Path:
     return lib
 
 
+def _rel_entry(base: Path, entry: Path) -> str:
+    """Host-separator relative form of a real directory under ``base``.
+
+    A Linux-target LD_LIBRARY_PATH is ':'-joined by production (frozen
+    target semantics), so a test entry must not itself contain ':'.
+    Absolute host paths violate that on Windows: the drive-letter colon is
+    reinterpreted by the target split and the scan silently finds no
+    candidates at all (the defect behind the red Windows CI matrix for
+    5b37593). Relative entries under the chdir'd base are separator-free
+    on every host, so the target split recovers exactly the intended entry
+    and the real directory scans stay genuine.
+    """
+    return os.path.join(*entry.resolve().relative_to(base.resolve()).parts)
+
+
 def _collect(
     environment: EnvironmentInfo | None = None,
     runner: FakeRunner | None = None,
@@ -116,10 +131,13 @@ class TestPlatformGate:
             assert inventory.scan_errors == {}
             assert runner.calls == []  # not even ldconfig runs
 
-    def test_linux_target_inventories(self, tmp_path):
+    def test_linux_target_inventories(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         lib_dir = tmp_path / "libs"
         _lib(lib_dir, "libcudart.so.12")
-        inventory = _collect(environment=_env_info(ld_library_path=str(lib_dir)))
+        inventory = _collect(
+            environment=_env_info(ld_library_path=_rel_entry(tmp_path, lib_dir))
+        )
         assert [c.family for c in inventory.candidates] == ["libcudart"]
 
 
@@ -127,7 +145,8 @@ class TestFamilyScope:
     def test_frozen_family_constant(self):
         assert SUPPORTED_FAMILIES == ("libcudart", "libcublas", "libcudnn")
 
-    def test_only_supported_families_collected(self, tmp_path):
+    def test_only_supported_families_collected(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         lib_dir = tmp_path / "libs"
         for name in (
             "libcudart.so.12",
@@ -141,10 +160,11 @@ class TestFamilyScope:
             "readme.txt",
         ):
             _lib(lib_dir, name)
-        inventory = _collect(environment=_env_info(ld_library_path=str(lib_dir)))
+        rel_lib = _rel_entry(tmp_path, lib_dir)
+        inventory = _collect(environment=_env_info(ld_library_path=rel_lib))
         found = {(c.family, c.path) for c in inventory.candidates}
         assert found == {
-            (family, str(lib_dir / f"{family}{suffix}"))
+            (family, os.path.join(rel_lib, f"{family}{suffix}"))
             for family, suffix in (
                 ("libcudart", ".so.12"),
                 ("libcublas", ".so.12"),
@@ -154,40 +174,48 @@ class TestFamilyScope:
 
 
 class TestLDLibraryPathInventory:
-    def test_source_order_preserved_with_entry_indexes(self, tmp_path):
-        # "/a::/b" — the empty segment keeps index 1 out, positions survive.
+    def test_source_order_preserved_with_entry_indexes(self, tmp_path, monkeypatch):
+        # "first::second" — the empty segment keeps index 1 out, positions survive.
+        monkeypatch.chdir(tmp_path)
         first = tmp_path / "first"
         second = tmp_path / "second"
         _lib(first, "libcudart.so.12")
         _lib(second, "libcudart.so.11")
+        rel_first = _rel_entry(tmp_path, first)
+        rel_second = _rel_entry(tmp_path, second)
         inventory = _collect(
-            environment=_env_info(ld_library_path=f"{first}::{second}")
+            environment=_env_info(ld_library_path=f"{rel_first}::{rel_second}")
         )
         by_order = {c.search_order: c for c in inventory.candidates}
         assert sorted(by_order) == [0, 2]  # the gap at index 1 is preserved
-        assert by_order[0].path == str(first / "libcudart.so.12")
-        assert by_order[2].path == str(second / "libcudart.so.11")
+        assert by_order[0].path == os.path.join(rel_first, "libcudart.so.12")
+        assert by_order[2].path == os.path.join(rel_second, "libcudart.so.11")
         for candidate in inventory.candidates:
             assert candidate.origin == ORIGIN_LD_LIBRARY_PATH
             assert candidate.search_group == ORIGIN_LD_LIBRARY_PATH
 
-    def test_same_directory_at_two_positions_keeps_both(self, tmp_path):
+    def test_same_directory_at_two_positions_keeps_both(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         lib_dir = tmp_path / "libs"
         _lib(lib_dir, "libcudart.so.12")
-        inventory = _collect(
-            environment=_env_info(ld_library_path=f"{lib_dir}::{lib_dir}")
-        )
+        rel = _rel_entry(tmp_path, lib_dir)
+        inventory = _collect(environment=_env_info(ld_library_path=f"{rel}::{rel}"))
         assert [c.search_order for c in inventory.candidates] == [0, 2]
 
-    def test_missing_entry_is_scan_error_not_crash(self, tmp_path):
+    def test_missing_entry_is_scan_error_not_crash(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         missing = tmp_path / "missing-entry"
         present = tmp_path / "present"
         _lib(present, "libcublas.so.12")
+        rel_missing = _rel_entry(tmp_path, missing)
+        rel_present = _rel_entry(tmp_path, present)
         inventory = _collect(
-            environment=_env_info(ld_library_path=f"{missing}:{present}")
+            environment=_env_info(ld_library_path=f"{rel_missing}:{rel_present}")
         )
-        assert str(missing) in inventory.scan_errors
-        assert [c.path for c in inventory.candidates] == [str(present / "libcublas.so.12")]
+        assert rel_missing in inventory.scan_errors
+        assert [c.path for c in inventory.candidates] == [
+            os.path.join(rel_present, "libcublas.so.12")
+        ]
 
 
 class TestToolkitRootInventory:
@@ -454,16 +482,18 @@ class TestLdconfigInventory:
         _collect(runner=runner)
         assert runner.calls == [("ldconfig", "-p")]
 
-    def test_failure_is_scan_error_and_other_roots_survive(self, tmp_path):
+    def test_failure_is_scan_error_and_other_roots_survive(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         lib_dir = tmp_path / "libs"
         _lib(lib_dir, "libcudart.so.12")
         runner = FakeRunner()  # default: every command fails
-        inventory = _collect(
-            environment=_env_info(ld_library_path=str(lib_dir)), runner=runner
-        )
+        rel = _rel_entry(tmp_path, lib_dir)
+        inventory = _collect(environment=_env_info(ld_library_path=rel), runner=runner)
         assert ORIGIN_LDCONFIG in inventory.scan_errors
         assert inventory.scan_errors[ORIGIN_LDCONFIG].startswith("ldconfig -p failed:")
-        assert [c.path for c in inventory.candidates] == [str(lib_dir / "libcudart.so.12")]
+        assert [c.path for c in inventory.candidates] == [
+            os.path.join(rel, "libcudart.so.12")
+        ]
 
     def test_header_line_ignored(self):
         # The real output starts with a human header line — never parsed as
@@ -475,67 +505,73 @@ class TestLdconfigInventory:
 
 
 class TestVersionSemantics:
-    def test_unversioned_soname_is_unknown(self, tmp_path):
+    def test_unversioned_soname_is_unknown(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         lib_dir = tmp_path / "libs"
         _lib(lib_dir, "libcudart.so")
-        inventory = _collect(environment=_env_info(ld_library_path=str(lib_dir)))
+        inventory = _collect(
+            environment=_env_info(ld_library_path=_rel_entry(tmp_path, lib_dir))
+        )
         candidate = inventory.candidates[0]
         assert candidate.version is None
         assert candidate.version_source == VERSION_SOURCE_UNKNOWN
 
-    def test_major_only_version_from_filename(self, tmp_path):
+    def test_major_only_version_from_filename(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         lib_dir = tmp_path / "libs"
         _lib(lib_dir, "libcudart.so.12")
         candidate = _collect(
-            environment=_env_info(ld_library_path=str(lib_dir))
+            environment=_env_info(ld_library_path=_rel_entry(tmp_path, lib_dir))
         ).candidates[0]
         assert candidate.version == "12"
         assert candidate.version_source == VERSION_SOURCE_FILENAME
 
-    def test_multi_component_version_kept_verbatim(self, tmp_path):
+    def test_multi_component_version_kept_verbatim(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         lib_dir = tmp_path / "libs"
         _lib(lib_dir, "libcudart.so.12.4.127")
         candidate = _collect(
-            environment=_env_info(ld_library_path=str(lib_dir))
+            environment=_env_info(ld_library_path=_rel_entry(tmp_path, lib_dir))
         ).candidates[0]
         assert candidate.version == "12.4.127"
         assert candidate.version_source == VERSION_SOURCE_FILENAME
 
     @requires_symlinks
-    def test_bare_link_gets_version_from_symlink_target(self, tmp_path):
+    def test_bare_link_gets_version_from_symlink_target(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         lib_dir = tmp_path / "libs"
         _lib(lib_dir, "libcudart.so.12.4.127")
         os.symlink(lib_dir / "libcudart.so.12.4.127", lib_dir / "libcudart.so")
-        candidate = _collect(
-            environment=_env_info(ld_library_path=str(lib_dir))
-        ).candidates[0]
-        assert candidate.path == str(lib_dir / "libcudart.so")
-        assert candidate.canonical_path == str(lib_dir / "libcudart.so.12.4.127")
+        rel = _rel_entry(tmp_path, lib_dir)
+        candidate = _collect(environment=_env_info(ld_library_path=rel)).candidates[0]
+        assert candidate.path == os.path.join(rel, "libcudart.so")
+        assert candidate.canonical_path == str((lib_dir / "libcudart.so.12.4.127").resolve())
         assert candidate.version == "12.4.127"
         assert candidate.version_source == VERSION_SOURCE_SYMLINK_TARGET
 
     @requires_symlinks
-    def test_observed_version_is_never_upgraded_by_target(self, tmp_path):
+    def test_observed_version_is_never_upgraded_by_target(self, tmp_path, monkeypatch):
         # libcudart.so.12 -> libcudart.so.12.4.127: the observed filename
         # says "12", so "12" it stays — no precision the filename lacks.
+        monkeypatch.chdir(tmp_path)
         lib_dir = tmp_path / "libs"
         _lib(lib_dir, "libcudart.so.12.4.127")
         os.symlink(lib_dir / "libcudart.so.12.4.127", lib_dir / "libcudart.so.12")
         candidate = _collect(
-            environment=_env_info(ld_library_path=str(lib_dir))
+            environment=_env_info(ld_library_path=_rel_entry(tmp_path, lib_dir))
         ).candidates[0]
         assert candidate.version == "12"
         assert candidate.version_source == VERSION_SOURCE_FILENAME
 
     @requires_symlinks
-    def test_dangling_symlink_is_recorded_conservatively(self, tmp_path):
+    def test_dangling_symlink_is_recorded_conservatively(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         lib_dir = tmp_path / "libs"
         lib_dir.mkdir()
         os.symlink(lib_dir / "libcudart.so.12.9.0", lib_dir / "libcudart.so.12")  # target absent
-        candidate = _collect(
-            environment=_env_info(ld_library_path=str(lib_dir))
-        ).candidates[0]
-        assert candidate.path == str(lib_dir / "libcudart.so.12")
+        rel = _rel_entry(tmp_path, lib_dir)
+        candidate = _collect(environment=_env_info(ld_library_path=rel)).candidates[0]
+        assert candidate.path == os.path.join(rel, "libcudart.so.12")
         assert candidate.version == "12"  # from the observed filename
         assert candidate.version_source == VERSION_SOURCE_FILENAME
 
@@ -548,65 +584,71 @@ class TestStrictCanonicalization:
     (never-verified) target into a family identity."""
 
     @requires_symlinks
-    def test_valid_misleading_symlink_canonical_is_the_resolved_target(self, tmp_path):
+    def test_valid_misleading_symlink_canonical_is_the_resolved_target(
+        self, tmp_path, monkeypatch
+    ):
         # libcudart.so.12 -> existing libcudart.so.11.8.89 (regression A).
+        monkeypatch.chdir(tmp_path)
         lib_dir = tmp_path / "libs"
         _lib(lib_dir, "libcudart.so.11.8.89")
         os.symlink(lib_dir / "libcudart.so.11.8.89", lib_dir / "libcudart.so.12")
         candidate = _collect(
-            environment=_env_info(ld_library_path=str(lib_dir))
+            environment=_env_info(ld_library_path=_rel_entry(tmp_path, lib_dir))
         ).candidates[0]
-        assert candidate.canonical_path == str(lib_dir / "libcudart.so.11.8.89")
+        assert candidate.canonical_path == str((lib_dir / "libcudart.so.11.8.89").resolve())
 
     @requires_symlinks
-    def test_dangling_symlink_canonical_is_none(self, tmp_path):
+    def test_dangling_symlink_canonical_is_none(self, tmp_path, monkeypatch):
         # libcudart.so.12 -> missing libcudart.so.11.x (regression C/D):
         # the observed filename identity survives; the target does not.
+        monkeypatch.chdir(tmp_path)
         lib_dir = tmp_path / "libs"
         lib_dir.mkdir()
         os.symlink(lib_dir / "libcudart.so.11.8.89", lib_dir / "libcudart.so.12")
         candidate = _collect(
-            environment=_env_info(ld_library_path=str(lib_dir))
+            environment=_env_info(ld_library_path=_rel_entry(tmp_path, lib_dir))
         ).candidates[0]
         assert candidate.canonical_path is None
         assert candidate.version == "12"
         assert candidate.version_source == VERSION_SOURCE_FILENAME
 
     @requires_symlinks
-    def test_dangling_bare_symlink_yields_no_target_identity(self, tmp_path):
+    def test_dangling_bare_symlink_yields_no_target_identity(self, tmp_path, monkeypatch):
         # A bare dangling alias must not contribute any identity: before
         # the strict invariant it lexically "resolved" to its missing
         # target's filename and claimed that version.
+        monkeypatch.chdir(tmp_path)
         lib_dir = tmp_path / "libs"
         lib_dir.mkdir()
         os.symlink(lib_dir / "libcudart.so.12.9.0", lib_dir / "libcudart.so")
         candidate = _collect(
-            environment=_env_info(ld_library_path=str(lib_dir))
+            environment=_env_info(ld_library_path=_rel_entry(tmp_path, lib_dir))
         ).candidates[0]
         assert candidate.canonical_path is None
         assert candidate.version is None
         assert candidate.version_source == VERSION_SOURCE_UNKNOWN
 
-    def test_regular_existing_file_canonical_is_itself(self, tmp_path):
+    def test_regular_existing_file_canonical_is_itself(self, tmp_path, monkeypatch):
         # A regular versioned file resolves to itself (regression E):
         # canonical basename == observed name by construction.
+        monkeypatch.chdir(tmp_path)
         lib_dir = tmp_path / "libs"
         _lib(lib_dir, "libcudart.so.12")
-        candidate = _collect(
-            environment=_env_info(ld_library_path=str(lib_dir))
-        ).candidates[0]
-        assert candidate.canonical_path == str(lib_dir / "libcudart.so.12")
+        rel = _rel_entry(tmp_path, lib_dir)
+        candidate = _collect(environment=_env_info(ld_library_path=rel)).candidates[0]
+        assert candidate.canonical_path == str((lib_dir / "libcudart.so.12").resolve())
 
     @requires_symlinks
-    def test_bare_valid_symlink_canonical_is_the_versioned_target(self, tmp_path):
+    def test_bare_valid_symlink_canonical_is_the_versioned_target(self, tmp_path, monkeypatch):
         # libcudnn.so -> existing libcudnn.so.9.1 (regression F shape).
+        monkeypatch.chdir(tmp_path)
         lib_dir = tmp_path / "libs"
         _lib(lib_dir, "libcudnn.so.9.1")
         os.symlink(lib_dir / "libcudnn.so.9.1", lib_dir / "libcudnn.so")
         candidate = _collect(
-            environment=_env_info(ld_library_path=str(lib_dir))
+            environment=_env_info(ld_library_path=_rel_entry(tmp_path, lib_dir))
         ).candidates[0]
-        assert candidate.canonical_path == str(lib_dir / "libcudnn.so.9.1")
+        assert candidate.canonical_path == str((lib_dir / "libcudnn.so.9.1").resolve())
 
 
 class TestFamilyGrammarHelpers:
@@ -637,7 +679,11 @@ class TestFamilyGrammarHelpers:
 
 
 class TestCandidateModelSemantics:
-    def test_origins_stay_in_frozen_vocabulary(self, tmp_path):
+    def test_origins_stay_in_frozen_vocabulary(self, tmp_path, monkeypatch):
+        # Only LD_LIBRARY_PATH is a ':'-joined target env value, so only it
+        # needs the separator-free relative form; the other roots are passed
+        # as plain host paths and stay absolute.
+        monkeypatch.chdir(tmp_path)
         site = tmp_path / "site"
         conda = tmp_path / "conda"
         lib_dir = tmp_path / "ldp"
@@ -648,7 +694,7 @@ class TestCandidateModelSemantics:
         _lib(conda / "lib", "libcudnn.so.9")
         inventory = _collect(
             environment=_env_info(
-                ld_library_path=str(lib_dir), conda_prefix=str(conda)
+                ld_library_path=_rel_entry(tmp_path, lib_dir), conda_prefix=str(conda)
             ),
             runner=FakeRunner({LDCONFIG_COMMAND[1:]: ok(LDCONFIG_SAMPLE)}),
             toolkit_roots=(str(toolkit),),
@@ -656,20 +702,31 @@ class TestCandidateModelSemantics:
         )
         assert {c.origin for c in inventory.candidates} == set(ORIGINS)
 
-    def test_filesystem_candidates_do_not_claim_sonames(self, tmp_path):
+    def test_filesystem_candidates_do_not_claim_sonames(self, tmp_path, monkeypatch):
         # A SONAME is reliably known only from ldconfig output; directory
         # scanning never invents one.
+        monkeypatch.chdir(tmp_path)
         lib_dir = tmp_path / "libs"
         _lib(lib_dir, "libcudart.so.12")
         candidate = _collect(
-            environment=_env_info(ld_library_path=str(lib_dir))
+            environment=_env_info(ld_library_path=_rel_entry(tmp_path, lib_dir))
         ).candidates[0]
         assert candidate.soname is None
 
-    def test_directory_named_like_a_library_is_not_a_file(self, tmp_path):
+    def test_directory_named_like_a_library_is_not_a_file(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         lib_dir = tmp_path / "libs"
         (lib_dir / "libcudart.so.12").mkdir(parents=True)
-        inventory = _collect(environment=_env_info(ld_library_path=str(lib_dir)))
+        rel = _rel_entry(tmp_path, lib_dir)
+        inventory = _collect(
+            environment=_env_info(ld_library_path=rel),
+            runner=FakeRunner({LDCONFIG_COMMAND[1:]: ok("")}),
+        )
+        # The entry is genuinely reachable and ldconfig succeeds empty, so
+        # the empty inventory can only come from the not-a-file rule — on
+        # 5b37593 Windows CI this passed vacuously because the mangled entry
+        # never resolved at all.
+        assert inventory.scan_errors == {}
         assert inventory.candidates == []
 
 
@@ -686,3 +743,43 @@ class TestBoundedBehavior:
         runner = FakeRunner()
         _collect(runner=runner, platform=Platform.WINDOWS)
         assert runner.calls == []
+
+
+class TestLinuxTargetEnvHermeticity:
+    """Regression for the red Windows CI matrix on 5b37593.
+
+    Linux-target simulations must build their ':'-joined LD_LIBRARY_PATH from
+    entries that survive the target split on ANY host. Embedding host-absolute
+    tmp_path values broke that on Windows — the drive-letter colon was consumed
+    by the split, so every entry-scanned candidate silently disappeared from
+    the inventory. If test construction regresses that way again, the inventory
+    test fails on the Windows CI leg and the separator audit fails on any host
+    whose absolute paths contain ':' (i.e. Windows).
+    """
+
+    def test_entries_never_embed_the_target_separator(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        lib_dir = tmp_path / "libs"
+        _lib(lib_dir, "libcudart.so.12")
+        rel = _rel_entry(tmp_path, lib_dir)
+        # The Linux-target split must recover exactly the intended entries
+        # (empty entry included); a ':' inside a host-absolute path (a Windows
+        # drive letter) breaks that identity.
+        assert f"{rel}::/opt/other".split(":") == [rel, "", "/opt/other"]
+
+    def test_linux_target_scan_succeeds_on_any_host(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        lib_dir = tmp_path / "libs"
+        _lib(lib_dir, "libcudart.so.12")
+        rel = _rel_entry(tmp_path, lib_dir)
+        inventory = _collect(
+            environment=_env_info(ld_library_path=rel),
+            runner=FakeRunner({LDCONFIG_COMMAND[1:]: ok("")}),
+        )
+        assert inventory.scan_errors == {}
+        assert [c.path for c in inventory.candidates] == [
+            os.path.join(rel, "libcudart.so.12")
+        ]
+        assert inventory.candidates[0].canonical_path == str(
+            (lib_dir / "libcudart.so.12").resolve()
+        )

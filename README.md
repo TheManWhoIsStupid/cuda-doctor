@@ -11,6 +11,15 @@ debug a CUDA problem: it looks at the GPUs, the NVIDIA driver, the CUDA toolkit(
 on disk and on `PATH`, the host compiler, and your PyTorch install — then tells
 you what looks wrong, why, and what to do about it.
 
+Findings come in two layers. **Issues** are stable low-level findings ("no
+nvcc on PATH", "driver below the documented minimum"), each with a code,
+evidence, and recommendations. **Diagnoses** are an additive root-cause layer
+on top: when the evidence is sufficient, cuda-doctor names the underlying
+conflict — disagreeing CUDA selectors, a PyTorch build that clashes with the
+local toolchain, a shadowed runtime library — and ranks at most one of them
+as the `PRIMARY` cause. Not every run has a diagnosis; a healthy machine
+simply reports none.
+
 It is inspired by `flutter doctor`: findings are explained in plain language,
 and a completed run always exits `0` (only internal tool failures exit non-zero).
 
@@ -49,7 +58,7 @@ cuda-doctor                  # full diagnosis, terminal report
 > "torch not installed" even when it is.
 
 ```text
-CUDA Doctor v0.1.2
+CUDA Doctor v0.2.0
 
 System
   OS              Linux Ubuntu 22.04.5 LTS (kernel 5.15.0-91-generic)
@@ -80,7 +89,10 @@ Summary
 fatal error. Findings never change the exit code — this is a diagnostician, not
 a CI gate.
 
-## What it checks (v0.1)
+## What it checks
+
+Low-level checks — each produces an **Issue** with a stable code, evidence,
+and concrete recommendations:
 
 | Area | Codes | Highlights |
 | --- | --- | --- |
@@ -91,9 +103,29 @@ a CI gate.
 | Compiler | `CMP001`–`CMP002` | no host compiler; gcc/Visual Studio outside the toolkit's supported range |
 | Environment | `ENV001`–`ENV004` | stale CUDA paths; duplicates; conflicting `LD_LIBRARY_PATH`; older CUDA shadowing newer in PATH |
 
-Every finding carries a stable issue code, evidence, and concrete
-recommendations. Example reports: [`examples/sample_report.md`](examples/sample_report.md)
+Example reports: [`examples/sample_report.md`](examples/sample_report.md)
 · [`examples/sample_report.json`](examples/sample_report.json).
+
+### Root-cause diagnoses (v0.2)
+
+On top of those checks, a diagnosis layer reasons over a normalized view of
+the whole environment and names the underlying conflict when the evidence
+supports one:
+
+| Code | Diagnosis | What it means |
+| --- | --- | --- |
+| `D001` | CUDA Toolkit Resolution Conflict | The *active* CUDA development selectors disagree — e.g. `CUDA_HOME` resolves to one toolkit while `nvcc` on `PATH` reports another. Several installed toolkits alone are **not** a conflict. |
+| `D002` | PyTorch / Local Toolkit Build Mismatch | The PyTorch build's CUDA version conflicts materially with the active local development toolchain. Relevant when building extensions against a local toolkit — not for wheel-only runtime use, where the local toolkit does not have to match PyTorch. |
+| `D003` | PyTorch CUDA Unavailable | Explains an observed `torch.cuda.is_available() == False` when enough evidence exists: CPU-only wheel, no visible GPU, unusable or incompatible driver, a runtime-library conflict, or an explicit `CUDA_VISIBLE_DEVICES` mask. With insufficient evidence the cause is reported conservatively as unknown — never guessed. |
+| `D004` | CUDA Runtime Library Conflict *(Linux only)* | Bounded static evidence that CUDA runtime-library resolution is conflicted — e.g. an `LD_LIBRARY_PATH` entry shadowing the copy a toolkit or Python package would otherwise load, judged by exact library load names. A risk indicator, **not** proof of which shared object was actually loaded. |
+
+A resolver then ranks the emitted diagnoses deterministically: at most one is
+`PRIMARY`; the others are `CONTRIBUTING`, `POSSIBLE`, or `SECONDARY`, with
+causal relationships made explicit (e.g. a runtime-library conflict
+`explains ->` unavailable CUDA). In the human reports the Diagnoses section
+leads the low-level issues, and a diagnosis may suppress the display of an
+issue it supersedes (`TORCH002` under `D003`, `TORCH004` under `D002`) — the
+stored Issues stay intact and the JSON report stays machine-complete.
 
 ### The nuance that matters: three different "CUDA versions"
 
@@ -133,7 +165,7 @@ overrides the static version comparison.
   Automated tests cover the Windows code paths with simulated environments;
   real-hardware validation is ongoing.
 - **macOS** — runs and reports "no NVIDIA driver" as informational (Apple
-  Silicon is out of scope for v0.1).
+  Silicon is out of scope).
 
 ## Privacy
 
@@ -143,7 +175,11 @@ Reports are designed to be shareable:
 - hostname and username are never collected in the first place;
 - `PATH`/`LD_LIBRARY_PATH` are shown only as the CUDA-relevant subset, never
   dumped in full;
-- nvidia-smi output excerpts are truncated.
+- nvidia-smi output excerpts are truncated;
+- the runtime-library inventory and CUDA probe exception details are internal —
+  never serialized into any report;
+- diagnosis pipeline errors are bounded and never contain raw exception text;
+- redaction covers the structured diagnosis text as well.
 
 Still, a JSON report describes your hardware and software stack — read it
 before posting publicly.
@@ -163,23 +199,42 @@ CLI (Typer) ─ CollectionRunner ─▶ Collectors (facts only)
                                      ▼
                               Issues + Summary
                                      ▼
-                    Reporters: terminal / JSON / Markdown
+                            DiagnosisFactBuilder
+                                     ▼
+              DiagnosisFacts (normalized, tri-state view)
+                                     ▼
+              D001 → D002 → D004 → D003 (diagnosis rules, pure)
+                                     ▼
+                DiagnosisResolver (assigns global roles)
+                                     ▼
+        DiagnosisResult (additive: + Diagnoses, diagnosis_errors)
+                                     ▼
+                 Reporters: terminal / JSON v2 / Markdown
 ```
 
 Key invariants (see `AGENTS.md`):
 
-- **Collectors never judge; checks never collect.** Rules are pure functions of
+- **Collectors never judge; checks never collect.** Collectors observe; the
+  low-level checks keep their own finding semantics and are pure functions of
   the snapshot (+ compatibility data), which makes them unit-testable without
   hardware.
+- **Facts normalize; rules reason.** The fact builder turns the snapshot into
+  a normalized tri-state view; each diagnosis rule (D001–D004) is a pure
+  function of those facts — the checks are *not* the root-cause rules.
+- **Only the resolver assigns roles.** Rules emit candidates; the resolver
+  deterministically selects at most one `PRIMARY` and ranks the rest.
+- **Reporters only present.** They serialize and render; nothing downstream
+  re-sorts, invents roles, or feeds back into the checks.
 - **Safe failure over crashes.** Every external probe is guarded; a failing
-  collector surfaces as data, not an exception.
+  collector or diagnosis component surfaces as bounded data, not an exception.
 - **Compatibility knowledge is data**, versioned JSON inside the package
   (`src/cuda_doctor/data/`), updatable without touching logic.
-- **Read-only, always.** v0.1 executes no command that modifies the system.
+- **Read-only, always.** cuda-doctor executes no command that modifies the
+  system; remediation steps are display-only text, never executed.
 
-## Limitations (v0.1)
+## Limitations
 
-- Single-user, single-machine scope; no container/WSL-specific detection.
+- Single-user, single-machine scope.
 - Compatibility decisions are deliberately **conservative**: driver minimums
   follow NVIDIA's documented CUDA minor-version-compatibility baselines per
   major family, and anything the bundled knowledge does not cover — a future
@@ -191,8 +246,13 @@ Key invariants (see `AGENTS.md`):
   toolkit version.
 - No conda-environment awareness beyond what `PATH`/env vars imply.
 - nvidia-smi is the only GPU source; `NVML`/`lspci` fallbacks are future work.
-- Chinese localization is planned (the maintainers are bilingual); v0.1 output
-  is English.
+- `D004` (runtime-library conflict) is Linux-only; there is no Windows
+  equivalent in this release.
+- Out of scope for the current feature set: WSL-specific diagnosis,
+  container/Docker detection, NCCL/distributed diagnostics, ROCm/HIP,
+  TensorFlow/JAX diagnosis, and automatic fixes.
+- Chinese localization is planned (the maintainers are bilingual); output is
+  English.
 
 ## Development
 
@@ -200,7 +260,7 @@ Key invariants (see `AGENTS.md`):
 bash scripts/dev_install.sh      # Linux/macOS   (pip install -e ".[dev]")
 # or: pwsh scripts/dev_install.ps1   (Windows)
 
-pytest                           # 310 tests: unit + integration (hermetic)
+pytest                           # 1,300+ hermetic tests: unit + integration
 ruff check src tests             # lint
 mypy                             # types (strict-ish: disallow_untyped_defs)
 ```
@@ -219,22 +279,23 @@ src/cuda_doctor/
 ├── cli.py                  # Typer app: diagnose / info / --version
 ├── core/                   # models, enums, CollectionRunner, exceptions
 ├── collectors/             # one module per fact source
-├── checks/                 # 24 diagnostic rules (pure)
-├── diagnosis/              # engine, Issue/Summary, recommendations
+├── checks/                 # 24 low-level checks (pure)
+├── diagnosis/              # facts, rules (D001–D004), resolver, models, engine
 ├── compatibility/          # driver/compiler/torch knowledge + JSON loading
 ├── reporters/              # terminal (Rich), JSON, Markdown
 ├── data/                   # bundled compatibility tables
 └── utils/                  # commands, parsing, paths, redaction, versions
 ```
 
-## Roadmap (v0.2+)
+## Roadmap (post-v0.2)
 
 - NVML and `lspci` fallbacks when nvidia-smi is absent or broken.
 - Conda-aware environment inspection.
 - `--json-schema` self-description and a stable JSON schema contract test.
 - WSL detection and WSL-specific driver mismatch explanations.
 - Chinese output (`--lang zh`).
-- `cuda-doctor fix --dry-run` advisory mode (still no modifications in v0.2).
+- `cuda-doctor fix --dry-run` advisory mode (display-only suggestions; the
+  tool itself stays read-only).
 
 ## License
 

@@ -358,6 +358,39 @@ def _assert_issue_semantics_unchanged(enabled, disabled) -> None:
     assert enabled.check_errors == disabled.check_errors
 
 
+# Raw private material injected into every failing diagnosis component:
+# none of these substrings may survive into any diagnosis_errors value.
+PRIVATE_EXCEPTION_PAYLOAD = (
+    "/home/alice/private/libcuda.so "
+    "LD_LIBRARY_PATH=/opt/private/cuda/lib64 "
+    "CUDA_VISIBLE_DEVICES=secret-value"
+)
+PRIVATE_SUBSTRINGS = (
+    "/home/alice/private/libcuda.so",
+    "LD_LIBRARY_PATH=/opt/private/cuda/lib64",
+    "CUDA_VISIBLE_DEVICES=secret-value",
+    "alice",
+    "/opt/private",
+    "secret-value",
+)
+
+
+def _assert_no_private_payload(errors: Mapping[str, str]) -> None:
+    """diagnosis_errors carries bounded values only (§23 error privacy).
+
+    The boundary is the carrier itself, not any later redaction: the
+    values must never contain raw exception text (arbitrary paths,
+    usernames, environment values), however the field is exposed.
+    """
+    joined = repr(errors)
+    for secret in PRIVATE_SUBSTRINGS:
+        assert secret not in joined, secret
+    for value in errors.values():
+        # Bounded shape: exception type name + the one stable generic
+        # message; str(exc) is never appended.
+        assert value.endswith(": diagnosis component failed"), value
+
+
 class TestDiagnosisPipelineHealthy:
     def test_healthy_snapshot_yields_no_diagnoses_and_no_errors(self):
         result = DiagnosisEngine().run(base_snapshot())
@@ -606,7 +639,7 @@ def fake_candidate(code: str) -> DiagnosisCandidate:
 
 class ExplodingFactBuilder(DiagnosisFactBuilder):
     def build(self, snapshot, issues, compatibility) -> DiagnosisFacts:
-        raise RuntimeError("fact builder boom")
+        raise RuntimeError(f"fact builder boom {PRIVATE_EXCEPTION_PAYLOAD}")
 
 
 class CountingFactBuilder(DiagnosisFactBuilder):
@@ -621,7 +654,7 @@ class CountingFactBuilder(DiagnosisFactBuilder):
 
 class ExplodingResolver(DiagnosisResolver):
     def resolve(self, candidates):
-        raise RuntimeError("resolver boom")
+        raise RuntimeError(f"resolver boom {PRIVATE_EXCEPTION_PAYLOAD}")
 
 
 class CountingResolver(DiagnosisResolver):
@@ -675,7 +708,11 @@ class TestDiagnosisFailureIsolation:
         )
         result = engine.run(critical_snapshot())
         # Bounded error under the frozen "facts" key; nothing fabricated.
-        assert result.diagnosis_errors == {"facts": "RuntimeError: fact builder boom"}
+        # The raw exception message (paths, env values) is not recorded.
+        assert result.diagnosis_errors == {
+            "facts": "RuntimeError: diagnosis component failed"
+        }
+        _assert_no_private_payload(result.diagnosis_errors)
         assert result.diagnoses == []
         assert journal == []  # no rule ever ran
         assert resolver.batches == []  # the resolver was never called
@@ -687,16 +724,18 @@ class TestDiagnosisFailureIsolation:
     def test_rule_failure_is_isolated_and_later_rules_still_run(self):
         journal: list[tuple[str, tuple[str, ...], int]] = []
         rules = [
-            FakeRule("D001", journal=journal, exc=ValueError("boom for /home/secretuser")),
+            FakeRule(
+                "D001", journal=journal, exc=ValueError(f"boom {PRIVATE_EXCEPTION_PAYLOAD}")
+            ),
             FakeRule("D002", journal=journal, candidate=fake_candidate("D002")),
             FakeRule("D004", journal=journal, candidate=fake_candidate("D004")),
             FakeRule("D003", journal=journal, candidate=fake_candidate("D003")),
         ]
         result = DiagnosisEngine(diagnosis_rules=rules).run(base_snapshot())
-        assert set(result.diagnosis_errors) == {"D001"}
-        assert result.diagnosis_errors["D001"] == (
-            "ValueError: boom for /home/secretuser"
-        )
+        assert result.diagnosis_errors == {
+            "D001": "ValueError: diagnosis component failed"
+        }
+        _assert_no_private_payload(result.diagnosis_errors)
         # The later rules all ran and their candidates were resolved.
         assert [entry[0] for entry in journal] == ["D001", "D002", "D004", "D003"]
         assert dx_order(result) == [
@@ -710,25 +749,32 @@ class TestDiagnosisFailureIsolation:
         assert journal[2][1] == ("D002",)
         assert journal[3][1] == ("D002", "D004")
 
-    def test_rule_exception_value_stays_out_of_public_json_output(self):
-        # diagnosis_errors is engine-internal state in Phase 11: a private
-        # path inside a recorded exception must not reach the v1 public
-        # surface (the reporter/schema phase owns any later exposure).
+    def test_rule_exception_values_are_bounded_and_private(self):
+        # The privacy boundary is diagnosis_errors itself, not just the
+        # public JSON surface: raw exception text (paths, usernames,
+        # environment values) must never be recorded, because the
+        # carrier is what Phase 12 will expose. The v1 reporter still
+        # omits the field entirely.
         rules = [
-            FakeRule("D001", exc=ValueError("boom for /home/secretuser/cuda")),
-            FakeRule("D002", exc=ValueError("boom LD_LIBRARY_PATH=/home/secretuser")),
+            FakeRule("D001", exc=ValueError(f"boom {PRIVATE_EXCEPTION_PAYLOAD}")),
+            FakeRule("D002", exc=OSError(f"boom {PRIVATE_EXCEPTION_PAYLOAD}")),
         ]
         snapshot = critical_snapshot()
         result = DiagnosisEngine(diagnosis_rules=rules).run(snapshot)
-        assert set(result.diagnosis_errors) == {"D001", "D002"}
+        # Exception type retained for debugging; message stable+generic.
+        assert result.diagnosis_errors == {
+            "D001": "ValueError: diagnosis component failed",
+            "D002": "OSError: diagnosis component failed",
+        }
+        _assert_no_private_payload(result.diagnosis_errors)
         payload = JsonReporter.build(
             ReportInputs(snapshot=snapshot, result=result, generated_at="2026-10-14T00:00:00+00:00")
         )
         assert "diagnosis_errors" not in payload
         assert "diagnoses" not in payload
         text = json.dumps(payload)
-        assert "secretuser" not in text
-        assert "LD_LIBRARY_PATH" not in text
+        for secret in PRIVATE_SUBSTRINGS:
+            assert secret not in text
 
     def test_d004_failure_leaves_d003_unavailable_not_acquitted(self, monkeypatch):
         # The dependency-failure pin (§23.1): with the real rules and a real
@@ -736,11 +782,14 @@ class TestDiagnosisFailureIsolation:
         # D003 must read that as "upstream unavailable" — landing on the
         # frozen UNKNOWN cause — never as proof no conflict exists.
         def explode(self, facts, issues, prior_candidates=NO_PRIOR_CANDIDATES):
-            raise RuntimeError("d004 probe exploded")
+            raise RuntimeError(f"d004 probe exploded {PRIVATE_EXCEPTION_PAYLOAD}")
 
         monkeypatch.setattr(D004RuntimeLibraryConflict, "evaluate", explode)
         result = DiagnosisEngine().run(critical_snapshot())
-        assert set(result.diagnosis_errors) == {"D004"}
+        assert result.diagnosis_errors == {
+            "D004": "RuntimeError: diagnosis component failed"
+        }
+        _assert_no_private_payload(result.diagnosis_errors)
         assert dx_order(result) == [("D003", DiagnosisRole.PRIMARY)]
         d003 = result.diagnoses[0]
         assert d003.confidence is Confidence.LOW
@@ -752,7 +801,10 @@ class TestDiagnosisFailureIsolation:
     def test_resolver_failure_attaches_nothing_and_keeps_issues(self):
         reference = DiagnosisEngine().run(critical_snapshot())
         result = DiagnosisEngine(resolver=ExplodingResolver()).run(critical_snapshot())
-        assert result.diagnosis_errors == {"resolver": "RuntimeError: resolver boom"}
+        assert result.diagnosis_errors == {
+            "resolver": "RuntimeError: diagnosis component failed"
+        }
+        _assert_no_private_payload(result.diagnosis_errors)
         # No partially role-less candidates ever become diagnoses.
         assert result.diagnoses == []
         _assert_issue_semantics_unchanged(result, reference)
@@ -765,10 +817,11 @@ class TestDiagnosisFailureIsolation:
         assert none_result.diagnosis_errors == {}  # None is "not evaluated"
 
         raised = DiagnosisEngine(
-            diagnosis_rules=[FakeRule("D001", exc=ValueError("boom"))]
+            diagnosis_rules=[FakeRule("D001", exc=ValueError(f"boom {PRIVATE_EXCEPTION_PAYLOAD}"))]
         ).run(critical_snapshot())
         assert raised.diagnoses == []
-        assert raised.diagnosis_errors == {"D001": "ValueError: boom"}
+        assert raised.diagnosis_errors == {"D001": "ValueError: diagnosis component failed"}
+        _assert_no_private_payload(raised.diagnosis_errors)
 
     def test_crashing_check_neither_aborts_diagnosis_nor_becomes_a_cause(self):
         result = DiagnosisEngine(checks=[ExplodingCheck()]).run(critical_snapshot())

@@ -31,6 +31,19 @@ _SEVERITY_ORDER = {
 }
 
 
+def _bounded_diagnosis_error(exc: Exception) -> str:
+    """Bounded, privacy-safe value for a diagnosis-pipeline failure.
+
+    Retains only the code-defined exception type name plus a stable
+    generic message. ``str(exc)`` is deliberately dropped: exception
+    text can embed arbitrary user paths, usernames, environment values
+    such as LD_LIBRARY_PATH/CUDA_VISIBLE_DEVICES, and raw probe
+    details, none of which may reach ``diagnosis_errors`` (§23 error
+    privacy). The stable key already identifies the component.
+    """
+    return f"{type(exc).__name__}: diagnosis component failed"
+
+
 def _default_diagnosis_rules() -> tuple[DiagnosisRule, ...]:
     """The accepted v0.2 rules in the frozen dependency order (§18.1).
 
@@ -56,8 +69,11 @@ class DiagnosisResult:
     finalized v0.2 root-cause layer (every entry role-resolved by the
     ``DiagnosisResolver``), and ``diagnosis_errors`` records bounded
     per-component diagnosis-pipeline failures (keyed by the stable
-    names "facts"/"D001"/"D002"/"D004"/"D003"/"resolver"). The two
-    layers are distinct: neither feeds the other's summary or errors.
+    names "facts"/"D001"/"D002"/"D004"/"D003"/"resolver"; each value
+    is only the exception type name plus a stable generic message —
+    never raw exception text, which can carry private paths and
+    environment values). The two layers are distinct: neither feeds
+    the other's summary or errors.
     """
 
     issues: list[Issue] = field(default_factory=list)
@@ -142,7 +158,7 @@ class DiagnosisEngine:
         try:
             facts = self._fact_builder.build(snapshot, issues, compatibility)
         except Exception as exc:
-            result.diagnosis_errors["facts"] = f"{type(exc).__name__}: {exc}"
+            result.diagnosis_errors["facts"] = _bounded_diagnosis_error(exc)
             return
         candidates: list[DiagnosisCandidate] = []
         prior_candidates: dict[str, DiagnosisCandidate] = {}
@@ -151,8 +167,9 @@ class DiagnosisEngine:
                 candidate = rule.evaluate(facts, issues, prior_candidates)
             except Exception as exc:
                 # Keyed by the rule's stable code, never its class name:
-                # the frozen component names are D001..D004 (§23).
-                result.diagnosis_errors[rule.code] = f"{type(exc).__name__}: {exc}"
+                # the frozen component names are D001..D004 (§23). The
+                # value is bounded — raw exception text never enters.
+                result.diagnosis_errors[rule.code] = _bounded_diagnosis_error(exc)
                 continue
             if candidate is not None:
                 # A None return is a normal "not evaluated": no
@@ -164,7 +181,7 @@ class DiagnosisEngine:
             # output order is final — the engine never re-sorts.
             result.diagnoses = self._resolver.resolve(candidates)
         except Exception as exc:
-            result.diagnosis_errors["resolver"] = f"{type(exc).__name__}: {exc}"
+            result.diagnosis_errors["resolver"] = _bounded_diagnosis_error(exc)
 
     @staticmethod
     def _load_compat(result: DiagnosisResult) -> CompatibilityData | None:

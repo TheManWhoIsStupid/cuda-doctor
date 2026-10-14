@@ -10,11 +10,11 @@ from cuda_doctor.reporters.base import Reporter, ReportInputs
 from cuda_doctor.utils.redact import redact_value
 from cuda_doctor.version import __version__
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class JsonReporter(Reporter):
-    """Full redacted snapshot + issues + summary, ready for diffing/archiving."""
+    """Full redacted snapshot + issues + diagnoses, ready for diffing/archiving."""
 
     def render(self, inputs: ReportInputs) -> str:
         payload = self.build(inputs)
@@ -29,7 +29,16 @@ class JsonReporter(Reporter):
             "generated_at": inputs.generated_at,
             "environment": snapshot_to_dict(inputs.snapshot, redact=True),
             "issues": [issue.to_dict(redact=True) for issue in result.issues],
+            # Schema v2 (additive): every finalized diagnosis through the
+            # accepted Diagnosis serializer — machine-complete, never
+            # filtered by presentation suppression.
+            "diagnoses": [
+                diagnosis.to_dict(redact=True) for diagnosis in result.diagnoses
+            ],
             "summary": result.summary.to_dict(),
             # Exception texts can embed absolute paths — redact like the rest.
             "check_errors": redact_value(dict(result.check_errors)),
+            # Separate layer from check_errors (bounded values by contract);
+            # redaction here is defense-in-depth only.
+            "diagnosis_errors": redact_value(dict(result.diagnosis_errors)),
         }

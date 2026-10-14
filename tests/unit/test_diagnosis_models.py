@@ -541,9 +541,10 @@ class TestSummaryCompatibility:
 
 
 class TestPublicSurfaceCompatibility:
-    """Phase-4 boundary: carrying diagnoses must not change public output."""
+    """Phase-12 boundary: schema v2 exposes diagnoses additively while the
+    issue layer, Summary semantics, and exit-code behavior stay v0.1."""
 
-    def test_cli_exit_code_and_json_unchanged(self, monkeypatch):
+    def test_cli_exit_code_stable_and_json_reports_diagnoses(self, monkeypatch):
         monkeypatch.setattr("cuda_doctor.cli._collect", lambda: base_snapshot())
         real_run = DiagnosisEngine.run
 
@@ -557,15 +558,17 @@ class TestPublicSurfaceCompatibility:
         outcome = CLI.invoke(app, ["diagnose", "--format", "json"])
         assert outcome.exit_code == 0
         payload = json.loads(outcome.output)
-        assert payload["schema_version"] == 1
-        assert "diagnoses" not in payload
-        assert "diagnosis_errors" not in payload
+        assert payload["schema_version"] == 2
+        assert payload["diagnoses"][0]["role"] == "primary"
+        assert payload["diagnosis_errors"] == {"D00X": "RuntimeError: simulated"}
+        # The issue layer stays issue-derived: a synthetic diagnosis never
+        # moves the summary of a healthy environment.
         assert payload["summary"]["status"] == "HEALTHY"
 
     @pytest.mark.parametrize(
         "reporter_cls", [TerminalReporter, MarkdownReporter, JsonReporter]
     )
-    def test_renderers_identical_with_and_without_diagnoses(self, reporter_cls):
+    def test_renderers_expose_diagnoses(self, reporter_cls):
         snapshot = base_snapshot()
         plain = DiagnosisEngine().run(snapshot)
         loaded = DiagnosisEngine().run(snapshot)
@@ -573,9 +576,12 @@ class TestPublicSurfaceCompatibility:
         loaded.diagnosis_errors["D00X"] = "RuntimeError: simulated"
         without = reporter_cls().render(inputs_for(snapshot, plain))
         with_diagnoses = reporter_cls().render(inputs_for(snapshot, loaded))
-        assert with_diagnoses == without
+        # Carrying diagnoses now changes the report — that is the point of
+        # schema v2. (An empty diagnosis layer still renders exactly the
+        # plain v0.1 output: plain already carries diagnoses=[].)
+        assert with_diagnoses != without
 
-    def test_json_payload_key_set_unchanged(self):
+    def test_json_payload_key_set(self):
         snapshot = base_snapshot()
         result = DiagnosisEngine().run(snapshot)
         result.diagnoses.append(make_full_diagnosis())
@@ -587,8 +593,10 @@ class TestPublicSurfaceCompatibility:
             "generated_at",
             "environment",
             "issues",
+            "diagnoses",
             "summary",
             "check_errors",
+            "diagnosis_errors",
         }
-        assert SCHEMA_VERSION == 1
+        assert SCHEMA_VERSION == 2
         assert payload["schema_version"] == SCHEMA_VERSION

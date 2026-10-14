@@ -69,7 +69,7 @@ Summary
 | `cuda-doctor` | Same as `cuda-doctor diagnose` |
 | `cuda-doctor diagnose` | Full diagnosis, terminal report |
 | `cuda-doctor diagnose --verbose` | Also show info-level notes and probe errors |
-| `cuda-doctor diagnose --format json` | Machine-readable report (schema v1) |
+| `cuda-doctor diagnose --format json` | Machine-readable report (schema v2) |
 | `cuda-doctor diagnose --format markdown --output report.md` | Write a shareable report |
 | `cuda-doctor info` | Tool metadata: version, checks, issue codes |
 | `cuda-doctor --version` | Version |

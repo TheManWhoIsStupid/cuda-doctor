@@ -69,8 +69,25 @@ class TestDiagnose:
         result = runner.invoke(app, ["diagnose", "--format", "json"])
         assert result.exit_code == 0
         payload = json.loads(result.output)
-        assert payload["schema_version"] == 1
+        assert payload["schema_version"] == 2
         assert payload["summary"]["status"] == "HEALTHY"
+
+    def test_json_format_reports_diagnoses_and_keeps_issues(self, fake_collect):
+        # v0.2 schema v2 through the real CLI path: D003 is diagnosed and
+        # TORCH002 stays machine-readable even though terminal/Markdown
+        # presentation would suppress the duplicate issue line.
+        snapshot = base_snapshot()
+        snapshot.pytorch = replace(snapshot.pytorch, cuda_available=False, devices=[])
+        fake_collect(snapshot)
+        result = runner.invoke(app, ["diagnose", "--format", "json"])
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["schema_version"] == 2
+        assert [d["code"] for d in payload["diagnoses"]] == ["D003"]
+        assert payload["diagnoses"][0]["role"] == "primary"
+        assert [issue["code"] for issue in payload["issues"]] == ["TORCH002"]
+        assert payload["summary"]["errors"] == 1
+        assert payload["diagnosis_errors"] == {}
 
     def test_markdown_format(self, fake_collect):
         fake_collect(base_snapshot())

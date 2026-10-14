@@ -752,9 +752,9 @@ class TestDiagnosisFailureIsolation:
     def test_rule_exception_values_are_bounded_and_private(self):
         # The privacy boundary is diagnosis_errors itself, not just the
         # public JSON surface: raw exception text (paths, usernames,
-        # environment values) must never be recorded, because the
-        # carrier is what Phase 12 will expose. The v1 reporter still
-        # omits the field entirely.
+        # environment values) must never be recorded. Phase 12 exposes the
+        # bounded values through schema v2, so the exposure itself is
+        # pinned here too.
         rules = [
             FakeRule("D001", exc=ValueError(f"boom {PRIVATE_EXCEPTION_PAYLOAD}")),
             FakeRule("D002", exc=OSError(f"boom {PRIVATE_EXCEPTION_PAYLOAD}")),
@@ -770,8 +770,10 @@ class TestDiagnosisFailureIsolation:
         payload = JsonReporter.build(
             ReportInputs(snapshot=snapshot, result=result, generated_at="2026-10-14T00:00:00+00:00")
         )
-        assert "diagnosis_errors" not in payload
-        assert "diagnoses" not in payload
+        # Schema v2 exposes the bounded values verbatim, separate from
+        # check_errors; nothing private rides along.
+        assert payload["diagnosis_errors"] == result.diagnosis_errors
+        assert payload["check_errors"] == {}
         text = json.dumps(payload)
         for secret in PRIVATE_SUBSTRINGS:
             assert secret not in text
